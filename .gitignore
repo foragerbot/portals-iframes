@@ -15,3 +15,4 @@ logs/
 # Build artifacts
 dist/
 build/
+.env
