@@ -276,6 +276,45 @@ app.post('/api/admin/spaces', requireAdmin, async (req, res, next) => {
   }
 });
 
+// ───────────────── Public space serving (static) ─────────────────
+
+// Serve static files for a space at /p/:slug/... (e.g. /p/demo-hud/index.html)
+app.use('/p/:slug', async (req, res, next) => {
+  try {
+    await ensureSpacesRoot();
+    const { slug } = req.params;
+
+    if (!isValidSlug(slug)) {
+      return res.status(404).send('Not found');
+    }
+
+    const spaces = await loadSpacesMeta();
+    const space = spaces.find((s) => s.slug === slug && s.status === 'active');
+
+    if (!space) {
+      return res.status(404).send('Space not found');
+    }
+
+    // Use express.static with the space directory as the root.
+    // Because this handler is mounted at /p/:slug, Express strips that part
+    // from req.url before it reaches this function, so /p/demo-hud/index.html
+    // becomes /index.html here.
+    const staticMiddleware = express.static(space.dirPath, {
+      fallthrough: false, // if file is missing, throw 404 instead of calling next()
+    });
+
+    return staticMiddleware(req, res, (err) => {
+      if (err) return next(err);
+      // If nothing handled it, send 404
+      if (!res.headersSent) {
+        res.status(404).send('File not found in space');
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ───────────────── 404 / error handlers ─────────────────
 
 // 404 handler
