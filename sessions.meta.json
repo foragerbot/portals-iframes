@@ -14,5 +14,21 @@
     "createdAt": "2025-12-14T15:11:30.378Z",
     "userAgent": "curl/8.7.1",
     "ip": "::1"
+  },
+  {
+    "id": "sid_dd5eb5923a714d274064994055315722",
+    "userId": "u_68b513754f7554aa8d855cc7acf60a80",
+    "email": "iamscottking@gmail.com",
+    "createdAt": "2025-12-14T18:19:14.426Z",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+    "ip": "::1"
+  },
+  {
+    "id": "sid_e8343ecb82bdc7ae46ced57649383ea6",
+    "userId": "u_68b513754f7554aa8d855cc7acf60a80",
+    "email": "iamscottking@gmail.com",
+    "createdAt": "2025-12-14T18:29:03.483Z",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+    "ip": "::ffff:127.0.0.1"
   }
 ]

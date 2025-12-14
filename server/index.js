@@ -13,6 +13,7 @@ import crypto from 'crypto';
 import OpenAI from 'openai';
 import multer from 'multer';
 import rateLimit from 'express-rate-limit';
+import sgMail from '@sendgrid/mail';
 
 
 // Load env vars from .env (if present)
@@ -41,6 +42,7 @@ const SPACES_META_PATH = path.join(ROOT_DIR, 'spaces.meta.json');
 const USERS_META_PATH = path.join(ROOT_DIR, 'users.meta.json');
 const TOKENS_META_PATH = path.join(ROOT_DIR, 'magicTokens.meta.json');
 const SESSIONS_META_PATH = path.join(ROOT_DIR, 'sessions.meta.json');
+const APPROVED_USERS_PATH = path.join(ROOT_DIR, 'approvedUsers.meta.json');
 
 // OpenAI client
 const openai = process.env.OPENAI_API_KEY
@@ -89,6 +91,34 @@ const gptRateLimiter = rateLimit({
     });
   },
 });
+
+const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || null;
+const SENDGRID_FROM = process.env.SENDGRID_FROM || null;
+
+if (SENDGRID_API_KEY && SENDGRID_FROM) {
+  sgMail.setApiKey(SENDGRID_API_KEY);
+  console.log('[mail] SendGrid configured, from:', SENDGRID_FROM);
+} else {
+  console.log('[mail] SendGrid not fully configured (missing key or from address)');
+}
+
+const PORTALS_NOTES_PATH = path.join(ROOT_DIR, 'docs', 'portals-sdk-notes.md');
+let portalsMarkdownCache = null;
+
+async function getPortalsMarkdown() {
+  if (portalsMarkdownCache !== null) {
+    return portalsMarkdownCache;
+  }
+  try {
+    const raw = await fs.readFile(PORTALS_NOTES_PATH, 'utf8');
+    portalsMarkdownCache = raw;
+    console.log('[gpt] loaded portals-sdk-notes.md (length:', raw.length, ')');
+  } catch (err) {
+    console.warn('[gpt] could not load portals-sdk-notes.md at', PORTALS_NOTES_PATH, err.message);
+    portalsMarkdownCache = '';
+  }
+  return portalsMarkdownCache;
+}
 
 const app = express();
 
@@ -313,6 +343,16 @@ async function loadUsersMeta() {
   return readJsonArray(USERS_META_PATH);
 }
 
+async function loadApprovedUsers() {
+  return readJsonArray(APPROVED_USERS_PATH);
+}
+
+async function isEmailApproved(email) {
+  const list = await loadApprovedUsers();
+  const normalized = (email || '').trim().toLowerCase();
+  return list.some((u) => (u.email || '').trim().toLowerCase() === normalized);
+}
+
 async function saveUsersMeta(users) {
   return writeJsonArray(USERS_META_PATH, users);
 }
@@ -342,21 +382,100 @@ async function getUserGptUsage(userId) {
   return usage;
 }
 
-// Dev-mode magic link email sender
 async function sendMagicLinkEmail(email, url) {
-  // For now we just log it. Later, plug in SendGrid here.
-  if (!process.env.SENDGRID_API_KEY || !process.env.SENDGRID_FROM) {
+  // If SendGrid isn't configured, fall back to dev-mode logging
+  if (!SENDGRID_API_KEY || !SENDGRID_FROM) {
     console.log(
       `[magic-link] dev mode: would send to ${email}: ${url}`
     );
     return;
   }
 
-  // TODO: integrate SendGrid (e.g. @sendgrid/mail) using SENDGRID_API_KEY / SENDGRID_FROM
-  console.log(
-    '[magic-link] SENDGRID_API_KEY is set but SendGrid integration is not yet implemented.'
-  );
+  const subject = 'Sign in to Jawn Overlays';
+  const escapedUrl = url.replace(/"/g, '&quot;'); // minimal safety
+
+  const html = `
+  <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:#020617; color:#e5e7eb; padding:24px;">
+    <table width="100%" cellspacing="0" cellpadding="0" style="max-width:520px; margin:0 auto; background:#0b1120; border-radius:14px; border:1px solid #1f2937;">
+      <tr>
+        <td style="padding:18px 20px 12px; border-bottom:1px solid #1f2937;">
+          <div style="font-size:11px; letter-spacing:0.18em; text-transform:uppercase; color:#22d3ee; margin-bottom:4px;">
+            Jawn Overlays
+          </div>
+          <div style="font-size:16px; font-weight:600; color:#e5e7eb;">
+            Magic link to sign in
+          </div>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:18px 20px 8px; font-size:14px; color:#cbd5f5;">
+          <p style="margin:0 0 10px;">Hi,</p>
+          <p style="margin:0 0 14px;">
+            Click the button below to sign in to your Jawn Overlays account and access your Portals iframe spaces.
+          </p>
+          <p style="margin:0 0 18px; font-size:12px; color:#9ca3af;">
+            This link expires in about <strong>15 minutes</strong> or after it&apos;s used once.
+          </p>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:0 20px 18px;">
+          <table cellspacing="0" cellpadding="0" style="margin:0 auto;">
+            <tr>
+              <td align="center" style="border-radius:999px; background:linear-gradient(to right,#22d3ee,#a855f7);">
+                <a href="${escapedUrl}" 
+                   style="display:inline-block; padding:10px 24px; font-size:13px; color:#020617; text-decoration:none; font-weight:600;">
+                  Sign in to Jawn Overlays
+                </a>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:0 20px 18px;">
+          <p style="margin:0 0 8px; font-size:12px; color:#9ca3af;">
+            If the button doesn&apos;t work, copy and paste this URL into your browser:
+          </p>
+          <p style="margin:0; font-size:11px; color:#22d3ee;">
+            <a href="${escapedUrl}" style="color:#22d3ee; text-decoration:none;">${escapedUrl}</a>
+          </p>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:12px 20px 16px; border-top:1px solid #1f2937;">
+          <p style="margin:0; font-size:11px; color:#6b7280;">
+            You&apos;re receiving this email because someone entered <strong>${email}</strong> on Jawn Overlays.
+            If this wasn&apos;t you, you can ignore this message.
+          </p>
+        </td>
+      </tr>
+    </table>
+  </div>
+  `;
+
+  const text = [
+    'Sign in to Jawn Overlays',
+    '',
+    `Click this link to sign in: ${url}`,
+    '',
+    'This link expires in about 15 minutes or after it’s used once.',
+    '',
+    `If you didn’t request this, you can ignore this email.`
+  ].join('\n');
+
+  const msg = {
+    to: email,
+    from: SENDGRID_FROM,
+    subject,
+    text,
+    html
+  };
+
+  await sgMail.send(msg);
+  console.log('[magic-link] sent email to', email);
 }
+
 
 // Attach req.user + req.session if sid cookie exists
 async function sessionMiddleware(req, res, next) {
@@ -491,6 +610,15 @@ app.post('/api/auth/magic/start', async (req, res, next) => {
       return res
         .status(400)
         .json({ error: 'bad_email', message: 'Invalid email address' });
+    }
+    
+    // Invite-only gate: only approved emails can receive magic links
+    const approved = await isEmailApproved(normalizedEmail);
+    if (!approved) {
+      return res.status(403).json({
+        error: 'not_approved',
+        message: 'This project is invite-only. Your email is not approved for access.',
+      });
     }
 
     const tokens = await loadTokensMeta();
@@ -773,32 +901,36 @@ app.post('/api/spaces/:slug/file', requireUser, async (req, res, next) => {
 //   model?: string,              // optional: gpt-4.1-mini, gpt-4.1-nano, gpt-4o-mini
 //   messages?: [{role,content}]  // optional prior chat history
 // }
-app.post('/api/spaces/:slug/gpt/chat', requireUser, gptRateLimiter, async (req, res, next) => {
-  try {
-    if (!openai) {
-      return res.status(503).json({
-        error: 'gpt_disabled',
-        message: 'OPENAI_API_KEY is not configured on the server',
-      });
-    }
+app.post(
+  '/api/spaces/:slug/gpt/chat',
+  requireUser,
+  gptRateLimiter,
+  async (req, res, next) => {
+    try {
+      if (!openai) {
+        return res.status(503).json({
+          error: 'gpt_disabled',
+          message: 'OPENAI_API_KEY is not configured on the server',
+        });
+      }
 
-    await ensureSpacesRoot();
-    const { slug } = req.params;
-    const { prompt, filePath, model: requestedModel, messages } = req.body || {};
+      await ensureSpacesRoot();
+      const { slug } = req.params;
+      const { prompt, filePath, model: requestedModel, messages } = req.body || {};
 
-    if (!isValidSlug(slug)) {
-      return res.status(400).json({ error: 'bad_slug' });
-    }
-    if (!prompt || typeof prompt !== 'string') {
-      return res.status(400).json({ error: 'missing_prompt' });
-    }
+      if (!isValidSlug(slug)) {
+        return res.status(400).json({ error: 'bad_slug' });
+      }
+      if (!prompt || typeof prompt !== 'string') {
+        return res.status(400).json({ error: 'missing_prompt' });
+      }
 
-    const space = await getUserSpaceBySlug(slug, req.user);
-    if (!space) {
-      return res.status(404).json({ error: 'space_not_found' });
-    }
+      const space = await getUserSpaceBySlug(slug, req.user);
+      if (!space) {
+        return res.status(404).json({ error: 'space_not_found' });
+      }
 
-          // Per-user daily GPT quota
+      // Per-user daily GPT quota
       const quotaCheck = await checkAndIncrementUserGptUsage(req.user.id, 1);
       if (!quotaCheck.ok) {
         return res.status(429).json({
@@ -808,93 +940,146 @@ app.post('/api/spaces/:slug/gpt/chat', requireUser, gptRateLimiter, async (req, 
         });
       }
 
-    const model = pickModel(requestedModel);
+      const model = pickModel(requestedModel);
 
-    // Optional: load current file content for context
-    let fileContext = null;
-    let fileLang = 'text';
-    if (filePath) {
-      try {
-        const fullPath = resolveSpacePath(space, filePath);
-        if (isEditableTextFile(fullPath)) {
-          const content = await fs.readFile(fullPath, 'utf8');
-          const MAX_FILE_CHARS = 20000;
-          const snippet =
-            content.length > MAX_FILE_CHARS
-              ? content.slice(0, MAX_FILE_CHARS) + '\n<!-- [truncated for GPT] -->'
-              : content;
+      // Optional: load current file content for context
+      let fileContext = null;
+      let fileLang = 'text';
+      if (filePath) {
+        try {
+          const fullPath = resolveSpacePath(space, filePath);
+          if (isEditableTextFile(fullPath)) {
+            const content = await fs.readFile(fullPath, 'utf8');
+            const MAX_FILE_CHARS = 20000;
+            const snippet =
+              content.length > MAX_FILE_CHARS
+                ? content.slice(0, MAX_FILE_CHARS) + '\n<!-- [truncated for GPT] -->'
+                : content;
 
-          const ext = (path.extname(filePath) || '').toLowerCase();
-          if (ext === '.html' || ext === '.htm') fileLang = 'html';
-          else if (ext === '.css') fileLang = 'css';
-          else if (ext === '.js' || ext === '.mjs') fileLang = 'javascript';
-          else if (ext === '.json') fileLang = 'json';
+            const ext = (path.extname(filePath) || '').toLowerCase();
+            if (ext === '.html' || ext === '.htm') fileLang = 'html';
+            else if (ext === '.css') fileLang = 'css';
+            else if (ext === '.js' || ext === '.mjs') fileLang = 'javascript';
+            else if (ext === '.json') fileLang = 'json';
 
-          fileContext = { path: filePath, snippet, lang: fileLang };
+            fileContext = { path: filePath, snippet, lang: fileLang };
+          }
+        } catch (err) {
+          console.warn('[gpt] failed to load file context', filePath, err.message);
         }
-      } catch (err) {
-        console.warn('[gpt] failed to load file context', filePath, err.message);
       }
-    }
 
-    // Build messages for the chat completion
-    const chatMessages = [];
+      // Decide if we should include the Portals SDK notes markdown
+      const lowerPrompt = (prompt || '').toLowerCase();
+      const wantsPortalsDocs =
+        lowerPrompt.includes('portals') ||
+        lowerPrompt.includes('unity') ||
+        lowerPrompt.includes('portalssdk') ||
+        lowerPrompt.includes('postmessage');
 
-    chatMessages.push({
-      role: 'system',
-      content: [
-        'You are a coding assistant helping a developer build HTML/CSS/JS overlays that run as iframes in a Unity/Portals-based game.',
-        'All code you generate must be client-side only (no Node.js, no server frameworks).',
-        'Prefer small, focused changes and clearly labeled code blocks.',
-        'When modifying a file, either provide the full updated file OR clear, copy-pastable snippets.',
-      ].join(' '),
-    });
+      const portalsDocs = wantsPortalsDocs ? await getPortalsMarkdown() : '';
 
-    if (fileContext) {
+      // Build messages for the chat completion
+      const chatMessages = [];
+
+      // General overlay / iframe system prompt
+chatMessages.push({
+  role: 'system',
+  content: [
+    'You are a coding assistant helping a developer build HTML/CSS/JS overlays that run as iframes in a Unity/Portals-based game.',
+    'All code you generate must be client-side only (no Node.js, no server frameworks).',
+    'Prefer small, focused changes and clearly labeled code blocks.',
+    'Always format your response as Markdown.',
+    'Wrap code in fenced blocks with a correct language tag (```html, ```css, ```js, ```json, etc.) so that a Markdown renderer can pretty-print it.',
+    'When modifying a file, either provide the full updated file OR clear, copy-pastable snippets.',
+  ].join(' '),
+});
+
+
+      // Portals SDK context
+      const portalsSdkContext = [
+        'The overlays you help with run inside an <iframe> that is embedded in the Portals Unity environment.',
+        'A Portals SDK script has already been loaded into the page, exposing a global "PortalsSdk" object.',
+        'The SDK source is publicly hosted at https://portals-labs.github.io/portals-sdk/portals-sdk.js and defines helpers like PortalsSdk.PortalsWindow, PortalsSdk.PortalsParent, and PortalsSdk.Origin (mapping common environment base URLs).',
+        'In general, the integration pattern is:',
+        '- The iframe window is available as PortalsSdk.PortalsWindow (usually just window).',
+        '- The parent Portals/Unity container is available as PortalsSdk.PortalsParent (usually window.parent).',
+        '- PortalsSdk.Origin provides well-known environment origins (Localhost, Dev, Prev, Prod, etc.), which can be used for origin checks in postMessage handlers.',
+        'When you need to communicate between the iframe HUD and the Portals/Unity parent:',
+        '- Use window.addEventListener("message", handler) in the iframe to receive messages.',
+        '- Use window.parent.postMessage(...) or PortalsSdk.PortalsParent.postMessage(...) to send messages back to the Portals/Unity environment.',
+        'All code you generate must remain client-side and iframe-safe. Do not invent new server endpoints or assume the SDK can make HTTP requests for you.',
+        'If you suggest message formats (e.g. { type: "HUD_UPDATE", payload: {...} }), clearly mark them as conventions the user can adapt to their own Portals/Unity setup.',
+        'When users ask about Portals integration issues (e.g. HUD not updating, messages not received), reason about:',
+        '- postMessage origins and targetOrigin filters,',
+        '- correct wiring of PortalsSdk.PortalsParent and PortalsSdk.PortalsWindow,',
+        '- and message types / payload shapes between Unity and the iframe.'
+      ].join(' ');
+
       chatMessages.push({
         role: 'system',
-        content: `Here is the current file ${fileContext.path}. Respond with updated code that fits this structure.\n\n\`\`\`${fileContext.lang}\n${fileContext.snippet}\n\`\`\``,
+        content: portalsSdkContext,
       });
-    }
 
-    // Include any prior chat history the frontend wants to send
-    if (Array.isArray(messages)) {
-      for (const m of messages) {
-        if (
-          m &&
-          typeof m.role === 'string' &&
-          typeof m.content === 'string' &&
-          ['user', 'assistant', 'system'].includes(m.role)
-        ) {
-          chatMessages.push({ role: m.role, content: m.content });
+      // Optional: inject markdown docs if the prompt looks Portals-related
+      if (portalsDocs) {
+        chatMessages.push({
+          role: 'system',
+          content:
+            'Here is a curated markdown reference for the Portals iframe SDK and Unity integration. ' +
+            'Consult it when generating examples or advising on Portals-related issues:\n\n' +
+            portalsDocs,
+        });
+      }
+
+      // File context, if we have one
+      if (fileContext) {
+        chatMessages.push({
+          role: 'system',
+          content: `Here is the current file ${fileContext.path}. Respond with updated code that fits this structure.\n\n\`\`\`${fileContext.lang}\n${fileContext.snippet}\n\`\`\``,
+        });
+      }
+
+      // Include any prior chat history the frontend wants to send
+      if (Array.isArray(messages)) {
+        for (const m of messages) {
+          if (
+            m &&
+            typeof m.role === 'string' &&
+            typeof m.content === 'string' &&
+            ['user', 'assistant', 'system'].includes(m.role)
+          ) {
+            chatMessages.push({ role: m.role, content: m.content });
+          }
         }
       }
+
+      // Finally, the new user prompt
+      chatMessages.push({
+        role: 'user',
+        content: prompt,
+      });
+
+      const completion = await openai.chat.completions.create({
+        model,
+        messages: chatMessages,
+        temperature: 0.3,
+      });
+
+      const answer = completion.choices[0]?.message || { role: 'assistant', content: '' };
+
+      res.json({
+        ok: true,
+        model,
+        message: answer,
+      });
+    } catch (err) {
+      console.error('[gpt] error in /api/spaces/:slug/gpt/chat', err);
+      next(err);
     }
-
-    // Finally, the new user prompt
-    chatMessages.push({
-      role: 'user',
-      content: prompt,
-    });
-
-    const completion = await openai.chat.completions.create({
-      model,
-      messages: chatMessages,
-      temperature: 0.3,
-    });
-
-    const answer = completion.choices[0]?.message || { role: 'assistant', content: '' };
-
-    res.json({
-      ok: true,
-      model,
-      message: answer,
-    });
-  } catch (err) {
-    console.error('[gpt] error in /api/spaces/:slug/gpt/chat', err);
-    next(err);
   }
-});
+);
+
 
 // ───────────────── Asset upload for a user space ─────────────────
 
