@@ -1,0 +1,18 @@
+[
+  {
+    "id": "sid_c71dd4c11d8faac96370c4eca05d2593",
+    "userId": "u_68b513754f7554aa8d855cc7acf60a80",
+    "email": "iamscottking@gmail.com",
+    "createdAt": "2025-12-14T15:04:55.205Z",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+    "ip": "::1"
+  },
+  {
+    "id": "sid_a506970f62e1cffe0e87c788e5ef3251",
+    "userId": "u_68b513754f7554aa8d855cc7acf60a80",
+    "email": "iamscottking@gmail.com",
+    "createdAt": "2025-12-14T15:11:30.378Z",
+    "userAgent": "curl/8.7.1",
+    "ip": "::1"
+  }
+]
