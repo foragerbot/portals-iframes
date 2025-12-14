@@ -16,3 +16,4 @@ logs/
 dist/
 build/
 .env
+approvedUsers.meta.json
