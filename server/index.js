@@ -10,6 +10,10 @@ import dotenv from 'dotenv';
 import fs from 'fs/promises';
 import fsSync from 'fs';
 import crypto from 'crypto';
+import OpenAI from 'openai';
+import multer from 'multer';
+import rateLimit from 'express-rate-limit';
+
 
 // Load env vars from .env (if present)
 dotenv.config();
@@ -38,7 +42,62 @@ const USERS_META_PATH = path.join(ROOT_DIR, 'users.meta.json');
 const TOKENS_META_PATH = path.join(ROOT_DIR, 'magicTokens.meta.json');
 const SESSIONS_META_PATH = path.join(ROOT_DIR, 'sessions.meta.json');
 
+// OpenAI client
+const openai = process.env.OPENAI_API_KEY
+  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  : null;
+
+// Cheap-but-capable default model
+const DEFAULT_GPT_MODEL = process.env.OPENAI_DEFAULT_MODEL || 'gpt-4.1-mini';
+
+// Limit to a small safe set so someone can't accidentally slam GPT-5.2 pro
+const ALLOWED_GPT_MODELS = [
+  'gpt-4.1-mini',
+  'gpt-4.1-nano',
+  'gpt-4o-mini'
+];
+
+// Upload limits
+const MAX_ASSET_FILE_SIZE = 10 * 1024 * 1024; // 10 MB per file
+const MAX_ASSET_FILES = 10;                   // max files per upload
+
+// Multer setup for in-memory uploads (we write to disk ourselves)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: MAX_ASSET_FILE_SIZE,
+    files: MAX_ASSET_FILES,
+  },
+});
+
+const GPT_MAX_CALLS_PER_DAY = Number(process.env.GPT_MAX_CALLS_PER_DAY || 200);
+const GPT_RATE_WINDOW_MS = Number(process.env.GPT_RATE_WINDOW_MS || 60_000);
+const GPT_RATE_MAX_PER_WINDOW = Number(
+  process.env.GPT_RATE_MAX_PER_WINDOW || 10
+);
+
+// Basic per-IP rate limiter for GPT endpoint
+const gptRateLimiter = rateLimit({
+  windowMs: GPT_RATE_WINDOW_MS,
+  max: GPT_RATE_MAX_PER_WINDOW,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res /*, next*/) => {
+    return res.status(429).json({
+      error: 'rate_limited',
+      message: 'Too many GPT requests, slow down a bit.',
+    });
+  },
+});
+
 const app = express();
+
+function pickModel(requested) {
+  if (requested && ALLOWED_GPT_MODELS.includes(requested)) {
+    return requested;
+  }
+  return DEFAULT_GPT_MODEL;
+}
 
 // ───────────────── Generic helpers ─────────────────
 
@@ -70,6 +129,44 @@ async function writeJsonArray(filePath, arr) {
 }
 
 // ───────────────── Spaces helpers ─────────────────
+function todayIsoDate() {
+  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+}
+
+async function checkAndIncrementUserGptUsage(userId, amount = 1) {
+  const users = await loadUsersMeta();
+  const idx = users.findIndex((u) => u.id === userId);
+  if (idx === -1) {
+    throw Object.assign(new Error('user_not_found'), { status: 500 });
+  }
+
+  const user = users[idx];
+  const today = todayIsoDate();
+
+  const usage = user.gptUsage || {
+    day: today,
+    calls: 0,
+  };
+
+  // Reset counter if day changed
+  if (usage.day !== today) {
+    usage.day = today;
+    usage.calls = 0;
+  }
+
+  if (usage.calls + amount > GPT_MAX_CALLS_PER_DAY) {
+    return { ok: false, usage };
+  }
+
+  usage.calls += amount;
+  users[idx] = {
+    ...user,
+    gptUsage: usage,
+  };
+  await saveUsersMeta(users);
+
+  return { ok: true, usage };
+}
 
 async function ensureSpacesRoot() {
   try {
@@ -133,6 +230,78 @@ function isEditableTextFile(filePath) {
   return allowed.includes(ext);
 }
 
+function isAllowedAssetFile(filename) {
+  const ext = (path.extname(filename) || '').toLowerCase();
+  const allowed = [
+    '.png',
+    '.jpg',
+    '.jpeg',
+    '.gif',
+    '.webp',
+    '.svg',
+    '.ico',
+    '.bmp',
+    '.apng',
+
+    '.woff',
+    '.woff2',
+    '.ttf',
+    '.otf',
+
+    '.json',
+    '.txt',
+  ];
+  return allowed.includes(ext);
+}
+
+// Recursively compute directory size (bytes). Fine for small spaces.
+async function getDirSizeBytes(dirPath) {
+  const entries = await fs.readdir(dirPath, { withFileTypes: true });
+  let total = 0;
+
+  for (const entry of entries) {
+    const full = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      total += await getDirSizeBytes(full);
+    } else if (entry.isFile()) {
+      const stat = await fs.stat(full);
+      total += stat.size;
+    }
+  }
+
+  return total;
+}
+
+async function updateSpaceSizeBytes(space, newSizeBytes) {
+  const spaces = await loadSpacesMeta();
+  const idx = spaces.findIndex((s) => s.slug === space.slug);
+  if (idx === -1) return;
+  spaces[idx] = {
+    ...spaces[idx],
+    currentSizeBytes: newSizeBytes,
+    updatedAt: new Date().toISOString(),
+  };
+  await saveSpacesMeta(spaces);
+}
+
+async function getSpaceUsage(space) {
+  let usedBytes = 0;
+  try {
+    usedBytes = await getDirSizeBytes(space.dirPath);
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+    usedBytes = 0;
+  }
+
+  const quotaMb = Number.isFinite(Number(space.quotaMb))
+    ? Number(space.quotaMb)
+    : 200;
+
+  const usedMb = +(usedBytes / (1024 * 1024)).toFixed(2);
+
+  return { usedBytes, usedMb, quotaMb };
+}
+
 
 // ───────────────── Users / auth helpers ─────────────────
 
@@ -162,6 +331,15 @@ async function loadSessionsMeta() {
 
 async function saveSessionsMeta(sessions) {
   return writeJsonArray(SESSIONS_META_PATH, sessions);
+}
+
+async function getUserGptUsage(userId) {
+  const users = await loadUsersMeta();
+  const user = users.find((u) => u.id === userId);
+  if (!user) return null;
+
+  const usage = user.gptUsage || null;
+  return usage;
 }
 
 // Dev-mode magic link email sender
@@ -580,6 +758,311 @@ app.post('/api/spaces/:slug/file', requireUser, async (req, res, next) => {
     res.json({
       ok: true,
       path: relPath,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ───────────────── GPT helper for a user space ─────────────────
+
+// POST /api/spaces/:slug/gpt/chat
+// body: {
+//   prompt: string,
+//   filePath?: string,           // relative to space root
+//   model?: string,              // optional: gpt-4.1-mini, gpt-4.1-nano, gpt-4o-mini
+//   messages?: [{role,content}]  // optional prior chat history
+// }
+app.post('/api/spaces/:slug/gpt/chat', requireUser, gptRateLimiter, async (req, res, next) => {
+  try {
+    if (!openai) {
+      return res.status(503).json({
+        error: 'gpt_disabled',
+        message: 'OPENAI_API_KEY is not configured on the server',
+      });
+    }
+
+    await ensureSpacesRoot();
+    const { slug } = req.params;
+    const { prompt, filePath, model: requestedModel, messages } = req.body || {};
+
+    if (!isValidSlug(slug)) {
+      return res.status(400).json({ error: 'bad_slug' });
+    }
+    if (!prompt || typeof prompt !== 'string') {
+      return res.status(400).json({ error: 'missing_prompt' });
+    }
+
+    const space = await getUserSpaceBySlug(slug, req.user);
+    if (!space) {
+      return res.status(404).json({ error: 'space_not_found' });
+    }
+
+          // Per-user daily GPT quota
+      const quotaCheck = await checkAndIncrementUserGptUsage(req.user.id, 1);
+      if (!quotaCheck.ok) {
+        return res.status(429).json({
+          error: 'gpt_quota_exceeded',
+          message: `Daily GPT limit reached (${GPT_MAX_CALLS_PER_DAY} calls).`,
+          usage: quotaCheck.usage,
+        });
+      }
+
+    const model = pickModel(requestedModel);
+
+    // Optional: load current file content for context
+    let fileContext = null;
+    let fileLang = 'text';
+    if (filePath) {
+      try {
+        const fullPath = resolveSpacePath(space, filePath);
+        if (isEditableTextFile(fullPath)) {
+          const content = await fs.readFile(fullPath, 'utf8');
+          const MAX_FILE_CHARS = 20000;
+          const snippet =
+            content.length > MAX_FILE_CHARS
+              ? content.slice(0, MAX_FILE_CHARS) + '\n<!-- [truncated for GPT] -->'
+              : content;
+
+          const ext = (path.extname(filePath) || '').toLowerCase();
+          if (ext === '.html' || ext === '.htm') fileLang = 'html';
+          else if (ext === '.css') fileLang = 'css';
+          else if (ext === '.js' || ext === '.mjs') fileLang = 'javascript';
+          else if (ext === '.json') fileLang = 'json';
+
+          fileContext = { path: filePath, snippet, lang: fileLang };
+        }
+      } catch (err) {
+        console.warn('[gpt] failed to load file context', filePath, err.message);
+      }
+    }
+
+    // Build messages for the chat completion
+    const chatMessages = [];
+
+    chatMessages.push({
+      role: 'system',
+      content: [
+        'You are a coding assistant helping a developer build HTML/CSS/JS overlays that run as iframes in a Unity/Portals-based game.',
+        'All code you generate must be client-side only (no Node.js, no server frameworks).',
+        'Prefer small, focused changes and clearly labeled code blocks.',
+        'When modifying a file, either provide the full updated file OR clear, copy-pastable snippets.',
+      ].join(' '),
+    });
+
+    if (fileContext) {
+      chatMessages.push({
+        role: 'system',
+        content: `Here is the current file ${fileContext.path}. Respond with updated code that fits this structure.\n\n\`\`\`${fileContext.lang}\n${fileContext.snippet}\n\`\`\``,
+      });
+    }
+
+    // Include any prior chat history the frontend wants to send
+    if (Array.isArray(messages)) {
+      for (const m of messages) {
+        if (
+          m &&
+          typeof m.role === 'string' &&
+          typeof m.content === 'string' &&
+          ['user', 'assistant', 'system'].includes(m.role)
+        ) {
+          chatMessages.push({ role: m.role, content: m.content });
+        }
+      }
+    }
+
+    // Finally, the new user prompt
+    chatMessages.push({
+      role: 'user',
+      content: prompt,
+    });
+
+    const completion = await openai.chat.completions.create({
+      model,
+      messages: chatMessages,
+      temperature: 0.3,
+    });
+
+    const answer = completion.choices[0]?.message || { role: 'assistant', content: '' };
+
+    res.json({
+      ok: true,
+      model,
+      message: answer,
+    });
+  } catch (err) {
+    console.error('[gpt] error in /api/spaces/:slug/gpt/chat', err);
+    next(err);
+  }
+});
+
+// ───────────────── Asset upload for a user space ─────────────────
+
+// POST /api/spaces/:slug/upload
+// multipart/form-data
+// fields:
+//   files[]  -> file inputs
+//   subdir   -> optional subdirectory inside the space (e.g. "assets" or "assets/icons")
+app.post(
+  '/api/spaces/:slug/upload',
+  requireUser,
+  upload.array('files', MAX_ASSET_FILES),
+  async (req, res, next) => {
+    try {
+      await ensureSpacesRoot();
+      const { slug } = req.params;
+      const subdirRaw = (req.body?.subdir || '').trim();
+
+      if (!isValidSlug(slug)) {
+        return res.status(400).json({ error: 'bad_slug' });
+      }
+
+      const space = await getUserSpaceBySlug(slug, req.user);
+      if (!space) {
+        return res.status(404).json({ error: 'space_not_found' });
+      }
+
+      const quotaMb = Number.isFinite(Number(space.quotaMb))
+        ? Number(space.quotaMb)
+        : 200;
+      const quotaBytes = quotaMb * 1024 * 1024;
+
+      const files = req.files || [];
+      if (!files.length) {
+        return res.status(400).json({ error: 'no_files' });
+      }
+
+      // Clean up subdir (POSIX style, no ..)
+      let subdir = subdirRaw || '';
+      if (subdir) {
+        subdir = subdir.replace(/\\/g, '/'); // normalize slashes
+        if (subdir.startsWith('/')) subdir = subdir.slice(1);
+        // We will rely on resolveSpacePath to block '..', but let's be extra cautious:
+        if (subdir.includes('..')) {
+          return res.status(400).json({ error: 'bad_subdir' });
+        }
+      }
+
+      // Validate extensions and total incoming size
+      let incomingBytes = 0;
+      for (const f of files) {
+        if (!isAllowedAssetFile(f.originalname)) {
+          return res.status(400).json({
+            error: 'unsupported_type',
+            file: f.originalname,
+          });
+        }
+        incomingBytes += f.size;
+      }
+
+      // Compute current directory size
+      let currentBytes = 0;
+      try {
+        currentBytes = await getDirSizeBytes(space.dirPath);
+      } catch (err) {
+        // If directory is new/empty, dir might not exist yet
+        if (err.code !== 'ENOENT') throw err;
+        currentBytes = 0;
+      }
+
+      const projectedBytes = currentBytes + incomingBytes;
+      if (projectedBytes > quotaBytes) {
+        return res.status(413).json({
+          error: 'quota_exceeded',
+          message: `Upload would exceed quota of ${quotaMb} MB`,
+          quotaMb,
+          currentMb: +(currentBytes / (1024 * 1024)).toFixed(2),
+          incomingMb: +(incomingBytes / (1024 * 1024)).toFixed(2),
+        });
+      }
+
+      const saved = [];
+
+      // Actually write the files
+      for (const f of files) {
+        const filename = f.originalname;
+        const relPath = subdir ? `${subdir}/${filename}` : filename;
+        const destPath = resolveSpacePath(space, relPath);
+
+        // Ensure parent directory exists
+        const destDir = path.dirname(destPath);
+        await fs.mkdir(destDir, { recursive: true });
+
+        // Write file from memory buffer
+        await fs.writeFile(destPath, f.buffer);
+
+        saved.push({
+          name: filename,
+          path: relPath,
+          size: f.size,
+        });
+      }
+
+      // Update stored size
+      await updateSpaceSizeBytes(space, projectedBytes);
+
+      res.status(201).json({
+        ok: true,
+        quotaMb,
+        usedMb: +(projectedBytes / (1024 * 1024)).toFixed(2),
+        files: saved,
+      });
+    } catch (err) {
+      // Multer can throw specific errors (like file too large)
+      if (err && err.code === 'LIMIT_FILE_SIZE') {
+        return res
+          .status(413)
+          .json({ error: 'file_too_large', message: 'File exceeds max size' });
+      }
+      if (err && err.code === 'LIMIT_FILE_COUNT') {
+        return res.status(413).json({
+          error: 'too_many_files',
+          message: 'Too many files in a single upload',
+        });
+      }
+      next(err);
+    }
+  }
+);
+
+// ───────────────── Space usage endpoint ─────────────────
+
+// GET /api/spaces/:slug/usage
+// Returns disk usage + GPT usage for the current user + space
+app.get('/api/spaces/:slug/usage', requireUser, async (req, res, next) => {
+  try {
+    await ensureSpacesRoot();
+    const { slug } = req.params;
+
+    if (!isValidSlug(slug)) {
+      return res.status(400).json({ error: 'bad_slug' });
+    }
+
+    const space = await getUserSpaceBySlug(slug, req.user);
+    if (!space) {
+      return res.status(404).json({ error: 'space_not_found' });
+    }
+
+    const spaceUsage = await getSpaceUsage(space);
+    const gptUsage = await getUserGptUsage(req.user.id);
+
+    res.json({
+      ok: true,
+      slug: space.slug,
+      quotaMb: spaceUsage.quotaMb,
+      usedMb: spaceUsage.usedMb,
+      usedBytes: spaceUsage.usedBytes,
+      gptUsage: gptUsage
+        ? {
+            day: gptUsage.day,
+            calls: gptUsage.calls,
+            dailyLimit: GPT_MAX_CALLS_PER_DAY,
+          }
+        : {
+            day: null,
+            calls: 0,
+            dailyLimit: GPT_MAX_CALLS_PER_DAY,
+          },
     });
   } catch (err) {
     next(err);
