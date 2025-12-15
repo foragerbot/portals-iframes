@@ -1153,16 +1153,37 @@ function AdminDashboard() {
     const req = requests.find((r) => r.id === reqId);
     if (!req) return;
 
+    // Prefer user-suggested slug, else derive from email
     const defaultSlug =
+      (req.suggestedSlug && req.suggestedSlug.toLowerCase()) ||
+      ((req.email || '').split('@')[0].replace(/[^a-z0-9-]/g, '-') || '');
+
+    const slug = defaultSlug;
+    const quotaMb = 200; // default quota
+
+    try {
+      setStatusMsg(`Approving request for ${req.email}…`);
+      await adminApproveSpaceRequest(adminToken, reqId, { slug, quotaMb });
+      setRequests((prev) => prev.filter((r) => r.id !== reqId));
+      setStatusMsg(`Approved ${req.email} with space "${slug}" (200 MB).`);
+    } catch (err) {
+      console.error(err);
+      setErrorMsg(err.payload?.message || 'Failed to approve request.');
+    }
+  };
+
+    const handleApproveCustom = async (reqId) => {
+    const req = requests.find((r) => r.id === reqId);
+    if (!req) return;
+
+    const baseDefault =
       (req.suggestedSlug && req.suggestedSlug.toLowerCase()) ||
       ((req.email || '').split('@')[0].replace(/[^a-z0-9-]/g, '-') || '');
 
     const slugInput = window.prompt(
       'Enter space slug (lowercase letters, digits, hyphens).',
-      defaultSlug
+      baseDefault
     );
-
-
     if (!slugInput) return;
 
     const slug = slugInput.trim();
@@ -1170,16 +1191,16 @@ function AdminDashboard() {
     const quotaMb = quotaInput ? Number(quotaInput) : 200;
 
     try {
-      setStatusMsg('Approving request...');
+      setStatusMsg(`Approving request for ${req.email}…`);
       await adminApproveSpaceRequest(adminToken, reqId, { slug, quotaMb });
-      // Remove from local list
       setRequests((prev) => prev.filter((r) => r.id !== reqId));
-      setStatusMsg(`Approved request for ${req.email} with space "${slug}".`);
+      setStatusMsg(`Approved ${req.email} with space "${slug}" (${quotaMb} MB).`);
     } catch (err) {
       console.error(err);
       setErrorMsg(err.payload?.message || 'Failed to approve request.');
     }
   };
+
 
   const handleReject = async (reqId) => {
     const req = requests.find((r) => r.id === reqId);
@@ -1306,22 +1327,32 @@ function AdminDashboard() {
                     Request note: <span style={{ color: 'var(--text-main)' }}>{r.note}</span>
                   </div>
                 )}
-                <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-                  <button
-                    className="button small"
-                    type="button"
-                    onClick={() => handleApprove(r.id)}
-                  >
-                    Approve & create space
-                  </button>
-                  <button
-                    className="button small"
-                    type="button"
-                    onClick={() => handleReject(r.id)}
-                  >
-                    Reject
-                  </button>
-                </div>
+<div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 4 }}>
+  <button
+    className="button small"
+    type="button"
+    onClick={() => handleApprove(r.id)}
+    title="Approve using suggested slug and default quota"
+  >
+    Approve (suggested)
+  </button>
+  <button
+    className="button small"
+    type="button"
+    onClick={() => handleApproveCustom(r.id)}
+    title="Approve with custom slug/quota"
+  >
+    Approve (custom)
+  </button>
+  <button
+    className="button small"
+    type="button"
+    onClick={() => handleReject(r.id)}
+  >
+    Reject
+  </button>
+</div>
+
               </div>
             ))}
           </div>
