@@ -391,7 +391,7 @@ async function sendMagicLinkEmail(email, url) {
     return;
   }
 
-  const subject = 'Sign in to Jawn Overlays';
+  const subject = 'Sign in to Portals iFrames @ Jawn.Bot';
   const escapedUrl = url.replace(/"/g, '&quot;'); // minimal safety
 
   const html = `
@@ -400,10 +400,10 @@ async function sendMagicLinkEmail(email, url) {
       <tr>
         <td style="padding:18px 20px 12px; border-bottom:1px solid #1f2937;">
           <div style="font-size:11px; letter-spacing:0.18em; text-transform:uppercase; color:#22d3ee; margin-bottom:4px;">
-            Jawn Overlays
+            Portals iFrames - 
           </div>
           <div style="font-size:16px; font-weight:600; color:#e5e7eb;">
-            Magic link to sign in
+            Sign in to access your Portals iFrames!
           </div>
         </td>
       </tr>
@@ -411,7 +411,7 @@ async function sendMagicLinkEmail(email, url) {
         <td style="padding:18px 20px 8px; font-size:14px; color:#cbd5f5;">
           <p style="margin:0 0 10px;">Hi,</p>
           <p style="margin:0 0 14px;">
-            Click the button below to sign in to your Jawn Overlays account and access your Portals iframe spaces.
+            Click the button below to sign in to your account and access your Portals iFrames @ Jawn.Bot.
           </p>
           <p style="margin:0 0 18px; font-size:12px; color:#9ca3af;">
             This link expires in about <strong>15 minutes</strong> or after it&apos;s used once.
@@ -425,7 +425,7 @@ async function sendMagicLinkEmail(email, url) {
               <td align="center" style="border-radius:999px; background:linear-gradient(to right,#22d3ee,#a855f7);">
                 <a href="${escapedUrl}" 
                    style="display:inline-block; padding:10px 24px; font-size:13px; color:#020617; text-decoration:none; font-weight:600;">
-                  Sign in to Jawn Overlays
+                  Sign in to Portals iFrames @ Jawn.Bot
                 </a>
               </td>
             </tr>
@@ -445,7 +445,7 @@ async function sendMagicLinkEmail(email, url) {
       <tr>
         <td style="padding:12px 20px 16px; border-top:1px solid #1f2937;">
           <p style="margin:0; font-size:11px; color:#6b7280;">
-            You&apos;re receiving this email because someone entered <strong>${email}</strong> on Jawn Overlays.
+            You&apos;re receiving this email because someone attempted to log in with the email <strong>${email}</strong>.
             If this wasn&apos;t you, you can ignore this message.
           </p>
         </td>
@@ -455,11 +455,11 @@ async function sendMagicLinkEmail(email, url) {
   `;
 
   const text = [
-    'Sign in to Jawn Overlays',
+    'Sign in to Portals iFrames @ Jawn.Bot',
     '',
     `Click this link to sign in: ${url}`,
     '',
-    'This link expires in about 15 minutes or after it’s used once.',
+    'This link expires in 15 minutes or after it’s used once.',
     '',
     `If you didn’t request this, you can ignore this email.`
   ].join('\n');
@@ -635,9 +635,11 @@ app.post('/api/auth/magic/start', async (req, res, next) => {
     });
     await saveTokensMeta(tokens);
 
-    const verifyUrl = `${APP_BASE_URL.replace(/\/+$/, '')}/api/auth/magic/verify?token=${encodeURIComponent(
+    const base = APP_BASE_URL.replace(/\/+$/, '');
+    const verifyUrl = `${base}/api/auth/magic/verify?token=${encodeURIComponent(
       token
-    )}`;
+    )}&redirect=1`;
+
 
     await sendMagicLinkEmail(normalizedEmail, verifyUrl);
 
@@ -654,7 +656,9 @@ app.post('/api/auth/magic/start', async (req, res, next) => {
 // Verify magic link: GET /api/auth/magic/verify?token=...
 app.get('/api/auth/magic/verify', async (req, res, next) => {
   try {
-    const { token } = req.query || {};
+    const { token, redirect } = req.query || {};
+    const wantsRedirect = redirect === '1';
+
     if (!token || typeof token !== 'string') {
       return res.status(400).json({ error: 'bad_token' });
     }
@@ -725,6 +729,14 @@ app.get('/api/auth/magic/verify', async (req, res, next) => {
     });
 
     // For now, just return JSON. Later the frontend can redirect after this.
+    const appBase = APP_BASE_URL.replace(/\/+$/, '');
+
+    if (wantsRedirect) {
+      // After verification, send user to the app UI rather than showing JSON
+      return res.redirect(302, `${appBase}/`);
+    }
+
+    // Fallback: JSON response (useful for curl / debugging)
     res.json({ ok: true, user });
   } catch (err) {
     next(err);
@@ -891,6 +903,136 @@ app.post('/api/spaces/:slug/file', requireUser, async (req, res, next) => {
     next(err);
   }
 });
+
+// Delete a file in a space
+// DELETE /api/spaces/:slug/file
+// body: { path }
+app.delete('/api/spaces/:slug/file', requireUser, async (req, res, next) => {
+  try {
+    await ensureSpacesRoot();
+    const { slug } = req.params;
+    const { path: relPath } = req.body || {};
+
+    if (!isValidSlug(slug)) {
+      return res.status(400).json({ error: 'bad_slug' });
+    }
+    if (!relPath) {
+      return res.status(400).json({ error: 'missing_path' });
+    }
+
+    const space = await getUserSpaceBySlug(slug, req.user);
+    if (!space) {
+      return res.status(404).json({ error: 'space_not_found' });
+    }
+
+    const filePath = resolveSpacePath(space, relPath);
+
+    // optional: only allow deleting editable text files
+    if (!isEditableTextFile(filePath)) {
+      return res.status(400).json({ error: 'unsupported_type' });
+    }
+
+    await fs.unlink(filePath).catch((err) => {
+      if (err.code === 'ENOENT') {
+        throw Object.assign(new Error('file_not_found'), { status: 404 });
+      }
+      throw err;
+    });
+
+    // You could update stored quota here, but we recompute on demand via usage,
+    // so it's fine to skip.
+
+    res.json({ ok: true, path: relPath });
+  } catch (err) {
+    if (err.message === 'file_not_found') {
+      return res.status(404).json({ error: 'file_not_found' });
+    }
+    next(err);
+  }
+});
+
+// Rename a file in a space
+// POST /api/spaces/:slug/file/rename
+// body: { from, to }
+app.post('/api/spaces/:slug/file/rename', requireUser, async (req, res, next) => {
+  try {
+    await ensureSpacesRoot();
+    const { slug } = req.params;
+    const { from, to } = req.body || {};
+
+    if (!isValidSlug(slug)) {
+      return res.status(400).json({ error: 'bad_slug' });
+    }
+    if (!from || !to) {
+      return res.status(400).json({ error: 'missing_fields' });
+    }
+
+    const space = await getUserSpaceBySlug(slug, req.user);
+    if (!space) {
+      return res.status(404).json({ error: 'space_not_found' });
+    }
+
+    // Normalize names (no subdirs for now, just simple filenames)
+    const fromName = from.trim();
+    const toName = to.trim();
+    if (!fromName || !toName) {
+      return res.status(400).json({ error: 'bad_name' });
+    }
+
+    // Optional: enforce basic extension sanity
+    const ext = (toName.split('.').pop() || '').toLowerCase();
+    const allowedExts = ['html', 'htm', 'css', 'js', 'mjs', 'json', 'txt'];
+    if (!allowedExts.includes(ext)) {
+      return res.status(400).json({
+        error: 'unsupported_type',
+        message: 'Please use one of: .html, .css, .js, .json, .txt'
+      });
+    }
+
+    const srcPath = resolveSpacePath(space, fromName);
+    const destPath = resolveSpacePath(space, toName);
+
+    // Ensure source exists
+    const srcStat = await fs.stat(srcPath).catch((err) => {
+      if (err.code === 'ENOENT') {
+        return null;
+      }
+      throw err;
+    });
+    if (!srcStat || !srcStat.isFile()) {
+      return res.status(404).json({ error: 'file_not_found' });
+    }
+
+    // Prevent overwriting an existing file
+    const destExists = await fs
+      .stat(destPath)
+      .then((s) => s && s.isFile())
+      .catch((err) => {
+        if (err.code === 'ENOENT') return false;
+        throw err;
+      });
+    if (destExists) {
+      return res.status(409).json({ error: 'target_exists' });
+    }
+
+    // Restrict to editable text files
+    if (!isEditableTextFile(srcPath) || !isEditableTextFile(destPath)) {
+      return res.status(400).json({ error: 'unsupported_type' });
+    }
+
+    await fs.rename(srcPath, destPath);
+
+    res.json({
+      ok: true,
+      from: fromName,
+      to: toName
+    });
+  } catch (err) {
+    console.error('[files] error renaming file', err);
+    next(err);
+  }
+});
+
 
 // ───────────────── GPT helper for a user space ─────────────────
 
@@ -1209,6 +1351,68 @@ app.post(
     }
   }
 );
+
+// DELETE an asset (e.g. image) in a space
+// DELETE /api/spaces/:slug/asset
+// body: { path } where path starts with "assets/"
+app.delete('/api/spaces/:slug/asset', requireUser, async (req, res, next) => {
+  try {
+    await ensureSpacesRoot();
+    const { slug } = req.params;
+    const { path: relPath } = req.body || {};
+
+    if (!isValidSlug(slug)) {
+      return res.status(400).json({ error: 'bad_slug' });
+    }
+    if (!relPath || typeof relPath !== 'string') {
+      return res.status(400).json({ error: 'missing_path' });
+    }
+
+    const space = await getUserSpaceBySlug(slug, req.user);
+    if (!space) {
+      return res.status(404).json({ error: 'space_not_found' });
+    }
+
+    // Require that assets live under "assets/" (no arbitrary paths)
+    let normalized = relPath.trim().replace(/\\/g, '/');
+    if (normalized.startsWith('/')) normalized = normalized.slice(1);
+    if (!normalized.toLowerCase().startsWith('assets/')) {
+      return res.status(400).json({ error: 'bad_asset_path' });
+    }
+
+    const filePath = resolveSpacePath(space, normalized);
+
+    // Check it's an allowed asset type
+    if (!isAllowedAssetFile(filePath)) {
+      return res.status(400).json({ error: 'unsupported_type' });
+    }
+
+    // Try to delete
+    await fs.unlink(filePath).catch((err) => {
+      if (err.code === 'ENOENT') {
+        throw Object.assign(new Error('asset_not_found'), { status: 404 });
+      }
+      throw err;
+    });
+
+    // Recompute usage and store it (optional but nice)
+    try {
+      const newSize = await getDirSizeBytes(space.dirPath);
+      await updateSpaceSizeBytes(space, newSize);
+    } catch (err) {
+      console.warn('[assets] failed to recompute size after delete:', err.message);
+    }
+
+    res.json({ ok: true, path: normalized });
+  } catch (err) {
+    if (err.message === 'asset_not_found') {
+      return res.status(404).json({ error: 'asset_not_found' });
+    }
+    console.error('[assets] error deleting asset', err);
+    next(err);
+  }
+});
+
 
 // ───────────────── Space usage endpoint ─────────────────
 

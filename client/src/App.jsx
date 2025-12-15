@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Routes, Route, useNavigate, useLocation, Navigate } from 'react-router-dom';
 import {
   getMe,
@@ -7,7 +7,11 @@ import {
   saveSpaceFile,
   getSpaceUsage,
   callSpaceGpt,
-  startMagicLink
+  startMagicLink,
+  deleteSpaceFile,
+  renameSpaceFile,
+  uploadSpaceAssets,
+  deleteSpaceAsset 
 } from './api.js';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -66,7 +70,7 @@ function LoginPage() {
   return (
     <div className="login-shell">
       <div className="login-card">
-        <h1>Sign in to Jawn Overlays</h1>
+        <h1>Sign in to Portals iFrames @ Jawn.Bot</h1>
         <p>
           Enter your email and we&apos;ll send a magic link. No passwords. After clicking the link,
           come back here and refresh.
@@ -95,8 +99,8 @@ function LayoutShell({ me, usage, children }) {
     <div className="app-shell">
       <header className="app-header">
         <div className="app-header-title">
-          <h1>Jawn Overlays</h1>
-          <span>Portals iframe spaces</span>
+          <h1>Portals iFrames @ Jawn.Bot</h1>
+          <span>Custom Portals iFrame Builder</span>
         </div>
         <div className="app-header-right">
           {usage && (
@@ -126,15 +130,121 @@ function Sidebar({
   showGpt,
   onToggleFiles,
   onToggleEditor,
-  onToggleGpt
+  onToggleGpt,
+  onUsageRefresh
 }) {
+  const [assets, setAssets] = useState([]);
+  const [assetsLoading, setAssetsLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [assetCopyStatus, setAssetCopyStatus] = useState('');
+
+  const fileInputRef = useRef(null);
+
+  const loadAssets = useCallback(
+    async (slug) => {
+      if (!slug) {
+        setAssets([]);
+        return;
+      }
+      setAssetsLoading(true);
+      try {
+        // list files under "assets" subdir
+        const data = await getSpaceFiles(slug, 'assets');
+        const items = (data.items || []).filter((i) => !i.isDir);
+        setAssets(items);
+      } catch (err) {
+        if (err.status === 404) {
+          // assets directory may not exist yet
+          setAssets([]);
+        } else {
+          console.error(err);
+        }
+      } finally {
+        setAssetsLoading(false);
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (activeSlug) {
+      loadAssets(activeSlug);
+    } else {
+      setAssets([]);
+    }
+  }, [activeSlug, loadAssets]);
+
+  const handleUploadClick = () => {
+    if (!activeSlug) {
+      window.alert('Select a space first.');
+      return;
+    }
+    fileInputRef.current?.click();
+  };
+
+  const handleFilesSelected = async (e) => {
+    const fileList = Array.from(e.target.files || []);
+    if (!fileList.length || !activeSlug) {
+      e.target.value = '';
+      return;
+    }
+
+    setUploading(true);
+    try {
+      await uploadSpaceAssets(activeSlug, fileList, 'assets');
+      await loadAssets(activeSlug);
+      if (onUsageRefresh) {
+        onUsageRefresh();
+      }
+    } catch (err) {
+      console.error(err);
+      window.alert('Failed to upload assets. Check console for details.');
+    } finally {
+      setUploading(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleDeleteAsset = async (relPath) => {
+    if (!activeSlug) return;
+    if (!window.confirm(`Delete asset "${relPath}"? This cannot be undone.`)) return;
+
+    try {
+      await deleteSpaceAsset(activeSlug, relPath);
+      await loadAssets(activeSlug);
+      if (onUsageRefresh) {
+        onUsageRefresh();
+      }
+    } catch (err) {
+      console.error(err);
+      window.alert('Failed to delete asset. Check console for details.');
+    }
+  };
+
+  const handleCopyAssetPath = async (relPath) => {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(relPath);
+        setAssetCopyStatus('Copied!');
+        setTimeout(() => setAssetCopyStatus(''), 1500);
+      } else {
+        window.prompt('Copy asset path:', relPath);
+      }
+    } catch (err) {
+      console.error(err);
+      window.alert('Failed to copy asset path. Here it is:\n\n' + relPath);
+    }
+  };
 
   return (
     <aside className="app-sidebar">
+      {/* SPACES */}
       <div className="sidebar-section">
         <h2>Spaces</h2>
         {spaces.length === 0 ? (
-          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No spaces yet. Ask admin.</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            No spaces yet. Ask admin.
+          </div>
         ) : (
           <ul className="space-list">
             {spaces.map((s) => (
@@ -156,6 +266,7 @@ function Sidebar({
         )}
       </div>
 
+      {/* USAGE */}
       <div className="sidebar-section">
         <h2>Usage</h2>
         {usage ? (
@@ -178,11 +289,13 @@ function Sidebar({
             </div>
           </>
         ) : (
-          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Select a space to view.</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            Select a space to view.
+          </div>
         )}
       </div>
 
-      {/* NEW: layout / panel toggles */}
+      {/* LAYOUT */}
       <div className="sidebar-section">
         <h2>Layout</h2>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -193,7 +306,7 @@ function Sidebar({
           >
             {showFiles ? '« Hide files panel' : 'Show files panel »'}
           </button>
-           <button
+          <button
             type="button"
             className="panel-toggle"
             onClick={onToggleEditor}
@@ -209,9 +322,102 @@ function Sidebar({
           </button>
         </div>
       </div>
+
+      {/* ASSETS */}
+      <div className="sidebar-section">
+        <h2>Assets</h2>
+        <input
+          type="file"
+          multiple
+          ref={fileInputRef}
+          style={{ display: 'none' }}
+          onChange={handleFilesSelected}
+        />
+        <button
+          type="button"
+          className="button small full-width"
+          onClick={handleUploadClick}
+          disabled={uploading || !activeSlug}
+        >
+          {uploading ? 'Uploading…' : 'Upload assets'}
+        </button>
+
+        <div style={{ marginTop: 8, maxHeight: 140, overflowY: 'auto' }}>
+          {assetsLoading ? (
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+              Loading assets…
+            </div>
+          ) : assets.length === 0 ? (
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+              No assets yet. Upload images/fonts into <code>assets/</code>.
+            </div>
+          ) : (
+            <ul
+              style={{
+                listStyle: 'none',
+                padding: 0,
+                margin: 0,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 4
+              }}
+            >
+              {assets.map((a) => {
+                const relPath = `assets/${a.name}`;
+                return (
+                  <li key={a.name} style={{ fontSize: 11 }}>
+                    <div style={{ color: 'var(--text-main)' }}>{a.name}</div>
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: 4
+                      }}
+                    >
+                      <code
+                        style={{
+                          fontFamily:
+                            "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
+                          fontSize: 10,
+                          color: 'var(--text-muted)'
+                        }}
+                      >
+                        {relPath}
+                      </code>
+                      <button
+                        type="button"
+                        className="asset-copy-btn"
+                        onClick={() => handleCopyAssetPath(relPath)}
+                        title="Copy asset path"
+                      >
+                        Copy
+                      </button>
+                      <button
+            type="button"
+            className="asset-delete-btn"
+            onClick={() => handleDeleteAsset(relPath)}
+            title="Delete asset"
+          >
+            ✕
+          </button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+        {assetCopyStatus && (
+          <div style={{ marginTop: 4, fontSize: 10, color: 'var(--text-muted)' }}>
+            {assetCopyStatus}
+          </div>
+        )}
+      </div>
     </aside>
   );
 }
+
 
 // NOTE: SpaceEditor now accepts onUsageRefresh, and does NOT own usage state itself.
 // It calls onUsageRefresh() after save and GPT so the parent can re-fetch usage.
@@ -226,6 +432,13 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
   const [gptPrompt, setGptPrompt] = useState('');
   const [gptResponse, setGptResponse] = useState('');
   const [gptBusy, setGptBusy] = useState(false);
+
+  const [creatingFile, setCreatingFile] = useState(false);
+  const [deletingFile, setDeletingFile] = useState(false);
+  const [renamingFile, setRenamingFile] = useState(false);
+
+  const [copyingUrl, setCopyingUrl] = useState(false);
+  const [copyStatus, setCopyStatus] = useState('');
 
   const loadFiles = useCallback(async () => {
     setFilesLoading(true);
@@ -281,6 +494,134 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
     }
   };
 
+  const onNewFile = async () => {
+    const name = window.prompt('New file name (e.g. hud.html)');
+    if (!name) return;
+
+    const trimmed = name.trim();
+    if (!trimmed) return;
+
+    const ext = (trimmed.split('.').pop() || '').toLowerCase();
+    const allowedExts = ['html', 'htm', 'css', 'js', 'mjs', 'json', 'txt'];
+    if (!allowedExts.includes(ext)) {
+      window.alert('Please use one of: .html, .css, .js, .json, .txt');
+      return;
+    }
+
+    if (files.some((f) => f.name === trimmed)) {
+      window.alert('A file with that name already exists.');
+      return;
+    }
+
+    let defaultContent = '';
+    if (ext === 'html' || ext === 'htm') {
+      defaultContent = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>${trimmed}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+  <!-- ${trimmed} -->
+</body>
+</html>
+`;
+    } else if (ext === 'css') {
+      defaultContent = `/* ${trimmed} */\n`;
+    } else if (ext === 'js' || ext === 'mjs') {
+      defaultContent = `// ${trimmed}\n`;
+    } else if (ext === 'json') {
+      defaultContent = `{\n  \n}\n`;
+    } else {
+      defaultContent = '';
+    }
+
+    setCreatingFile(true);
+    try {
+      await saveSpaceFile(slug, trimmed, defaultContent);
+      await loadFiles();
+      setSelectedPath(trimmed);
+      await loadFile(trimmed);
+      if (onUsageRefresh) {
+        onUsageRefresh();
+      }
+    } catch (err) {
+      console.error(err);
+      window.alert('Failed to create file. Check console for details.');
+    } finally {
+      setCreatingFile(false);
+    }
+  };
+
+  const onDeleteFile = async (name) => {
+    if (!window.confirm(`Delete "${name}"? This cannot be undone.`)) return;
+
+    setDeletingFile(true);
+    try {
+      await deleteSpaceFile(slug, name);
+      const updatedFiles = files.filter((f) => f.name !== name);
+      setFiles(updatedFiles);
+
+      if (selectedPath === name) {
+        const next = updatedFiles[0]?.name || null;
+        setSelectedPath(next);
+        if (next) {
+          await loadFile(next);
+        } else {
+          setFileContent('');
+        }
+      }
+
+      if (onUsageRefresh) {
+        onUsageRefresh();
+      }
+    } catch (err) {
+      console.error(err);
+      window.alert('Failed to delete file. Check console for details.');
+    } finally {
+      setDeletingFile(false);
+    }
+  };
+
+  const onRenameFile = async (oldName) => {
+    const input = window.prompt('Rename file', oldName);
+    if (!input) return;
+
+    const trimmed = input.trim();
+    if (!trimmed || trimmed === oldName) return;
+
+    const ext = (trimmed.split('.').pop() || '').toLowerCase();
+    const allowedExts = ['html', 'htm', 'css', 'js', 'mjs', 'json', 'txt'];
+    if (!allowedExts.includes(ext)) {
+      window.alert('Please use one of: .html, .css, .js, .json, .txt');
+      return;
+    }
+
+    if (files.some((f) => f.name === trimmed)) {
+      window.alert('A file with that name already exists.');
+      return;
+    }
+
+    setRenamingFile(true);
+    try {
+      await renameSpaceFile(slug, oldName, trimmed);
+      await loadFiles();
+      if (selectedPath === oldName) {
+        setSelectedPath(trimmed);
+        await loadFile(trimmed);
+      }
+      if (onUsageRefresh) {
+        onUsageRefresh();
+      }
+    } catch (err) {
+      console.error(err);
+      window.alert('Failed to rename file. Check console for details.');
+    } finally {
+      setRenamingFile(false);
+    }
+  };
+
   const onRunGpt = async () => {
     if (!gptPrompt.trim()) return;
     setGptBusy(true);
@@ -302,6 +643,29 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
     }
   };
 
+  const onCopyIframeUrl = async () => {
+    if (!selectedPath) return;
+
+    const origin = window.location.origin.replace(/\/+$/, '');
+    const url = `${origin}/p/${encodeURIComponent(slug)}/${encodeURIComponent(selectedPath)}`;
+
+    try {
+      setCopyingUrl(true);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(url);
+      } else {
+        window.prompt('Copy iframe URL:', url);
+      }
+      setCopyStatus('Copied!');
+      setTimeout(() => setCopyStatus(''), 2000);
+    } catch (err) {
+      console.error(err);
+      window.alert('Failed to copy URL. Here it is:\n\n' + url);
+    } finally {
+      setCopyingUrl(false);
+    }
+  };
+
   return (
     <div className="app-content">
       <div className="editor-shell">
@@ -316,19 +680,59 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
                 </div>
               </div>
             </div>
-            <ul className="file-list">
-              {files.map((f) => (
-                <li
-                  key={f.name}
-                  className={
-                    'file-item' + (selectedPath === f.name ? ' active' : '')
-                  }
-                  onClick={() => setSelectedPath(f.name)}
-                >
-                  {f.name}
-                </li>
-              ))}
-            </ul>
+
+            <div className="panel-body-files">
+              <ul className="file-list">
+                {files.map((f) => (
+                  <li
+                    key={f.name}
+                    className={
+                      'file-item' + (selectedPath === f.name ? ' active' : '')
+                    }
+                    onClick={() => setSelectedPath(f.name)}
+                  >
+                    <span className="file-item-name">{f.name}</span>
+                    <span className="file-item-actions">
+                      <button
+                        type="button"
+                        className="file-item-rename"
+                        title="Rename file"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onRenameFile(f.name);
+                        }}
+                        disabled={renamingFile}
+                      >
+                        ✎
+                      </button>
+                      <button
+                        type="button"
+                        className="file-item-delete"
+                        title="Delete file"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDeleteFile(f.name);
+                        }}
+                        disabled={deletingFile}
+                      >
+                        ✕
+                      </button>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <div style={{ marginTop: 8 }}>
+              <button
+                type="button"
+                className="button small full-width"
+                onClick={onNewFile}
+                disabled={creatingFile}
+              >
+                {creatingFile ? 'Creating…' : '+ New file'}
+              </button>
+            </div>
           </div>
         )}
 
@@ -352,15 +756,31 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
                   spellCheck={false}
                 />
                 <div className="editor-actions">
-                  <button
-                    className="button primary"
-                    onClick={onSave}
-                    disabled={saving}
-                  >
-                    {saving ? 'Saving…' : 'Save file'}
-                  </button>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                    Changes go live at <code>/p/{slug}/{selectedPath}</code>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                      className="button primary"
+                      onClick={onSave}
+                      disabled={saving}
+                    >
+                      {saving ? 'Saving…' : 'Save file'}
+                    </button>
+                    <button
+                      className="button small"
+                      type="button"
+                      onClick={onCopyIframeUrl}
+                      disabled={!selectedPath || copyingUrl}
+                    >
+                      {copyingUrl ? 'Copying…' : 'Copy iframe URL'}
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'right' }}>
+                    {copyStatus
+                      ? copyStatus
+                      : (
+                        <>
+                          Changes live at <code>/p/{slug}/{selectedPath}</code>
+                        </>
+                      )}
                   </div>
                 </div>
               </>
@@ -379,57 +799,53 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
                 </div>
               </div>
             </div>
-
-<div className="gpt-messages">
-  {gptResponse ? (
-    <ReactMarkdown
-      className="gpt-markdown"
-      remarkPlugins={[remarkGfm]}
-      components={{
-        // Pretty-print code blocks inside your existing card style
-        code({ node, inline, className, children, ...props }) {
-          if (inline) {
-            return (
-              <code className={className} {...props}>
-                {children}
-              </code>
-            );
-          }
-          return (
-            <pre className="gpt-code">
-              <code className={className} {...props}>
-                {children}
-              </code>
-            </pre>
-          );
-        },
-        p({ node, children, ...props }) {
-          return (
-            <p style={{ margin: '0 0 6px', fontSize: 12 }} {...props}>
-              {children}
-            </p>
-          );
-        },
-        li({ node, children, ...props }) {
-          return (
-            <li style={{ marginBottom: 4 }} {...props}>
-              {children}
-            </li>
-          );
-        }
-      }}
-    >
-      {gptResponse}
-    </ReactMarkdown>
-  ) : (
-    <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-      Ask GPT to help refactor your HUD or generate snippets. It will see the current file
-      when a path is selected.
-    </div>
-  )}
-</div>
-
-
+            <div className="gpt-messages">
+              {gptResponse ? (
+                <ReactMarkdown
+                  className="gpt-markdown"
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    code({ node, inline, className, children, ...props }) {
+                      if (inline) {
+                        return (
+                          <code className={className} {...props}>
+                            {children}
+                          </code>
+                        );
+                      }
+                      return (
+                        <pre className="gpt-code">
+                          <code className={className} {...props}>
+                            {children}
+                          </code>
+                        </pre>
+                      );
+                    },
+                    p({ node, children, ...props }) {
+                      return (
+                        <p style={{ margin: '0 0 6px', fontSize: 12 }} {...props}>
+                          {children}
+                        </p>
+                      );
+                    },
+                    li({ node, children, ...props }) {
+                      return (
+                        <li style={{ marginBottom: 4 }} {...props}>
+                          {children}
+                        </li>
+                      );
+                    }
+                  }}
+                >
+                  {gptResponse}
+                </ReactMarkdown>
+              ) : (
+                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                  Ask GPT to help refactor your HUD or generate snippets. It will see the current file
+                  when a path is selected.
+                </div>
+              )}
+            </div>
             <div className="gpt-input">
               <textarea
                 placeholder="e.g. “Add a pulsing border around the HUD”"
@@ -455,8 +871,6 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
     </div>
   );
 }
-
-
 
 function DashboardPage() {
   const { me, loading } = useMe();
@@ -539,6 +953,8 @@ return (
       onToggleFiles={() => setShowFiles((v) => !v)}
       onToggleEditor={() => setShowEditor((v) => !v)}
       onToggleGpt={() => setShowGpt((v) => !v)}
+      onUsageRefresh={() => refreshUsage(activeSlug)}
+
     />
     {activeSlug ? (
       <SpaceEditor
