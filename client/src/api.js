@@ -124,12 +124,13 @@ export function deleteSpaceAsset(slug, relPath) {
   });
 }
 
-export function requestWorkspace(note) {
+export function requestWorkspace(note, suggestedSlug) {
   return request('/api/spaces/request', {
     method: 'POST',
-    body: JSON.stringify({ note })
+    body: JSON.stringify({ note, suggestedSlug })
   });
 }
+
 
 export function adminGetSpaceRequests(adminToken, status = 'pending') {
   const params = new URLSearchParams();

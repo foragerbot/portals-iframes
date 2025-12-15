@@ -1474,6 +1474,7 @@ app.get('/api/spaces/:slug/usage', requireUser, async (req, res, next) => {
 app.post('/api/spaces/request', requireUser, async (req, res, next) => {
   try {
     const note = (req.body?.note || '').toString().trim();
+    const suggestedSlugRaw = (req.body?.suggestedSlug || '').toString().trim();
     const now = new Date();
 
     const requests = await loadWorkspaceRequests();
@@ -1490,12 +1491,25 @@ app.post('/api/spaces/request', requireUser, async (req, res, next) => {
       });
     }
 
+    let suggestedSlug = null;
+    if (suggestedSlugRaw) {
+      const normalized = suggestedSlugRaw.toLowerCase();
+      if (!isValidSlug(normalized)) {
+        return res.status(400).json({
+          error: 'bad_suggested_slug',
+          message: 'Suggested workspace slug must be 3-32 chars of lowercase letters, digits, or hyphens.'
+        });
+      }
+      suggestedSlug = normalized;
+    }
+
     const reqRecord = {
       id: generateId('wr_'),
       userId: req.user.id,
       email: req.user.email,
       status: 'pending', // 'pending' | 'approved' | 'rejected'
       note: note || null,
+      suggestedSlug,
       createdAt: now.toISOString(),
       updatedAt: now.toISOString()
     };
@@ -1506,7 +1520,8 @@ app.post('/api/spaces/request', requireUser, async (req, res, next) => {
     console.log('[workspace-requests] new request', {
       id: reqRecord.id,
       userId: reqRecord.userId,
-      email: reqRecord.email
+      email: reqRecord.email,
+      suggestedSlug
     });
 
     res.status(201).json({
@@ -1518,6 +1533,7 @@ app.post('/api/spaces/request', requireUser, async (req, res, next) => {
     next(err);
   }
 });
+
 
 // ───────────────── Admin routes (manual provisioning) ─────────────────
 

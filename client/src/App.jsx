@@ -891,6 +891,8 @@ function DashboardPage() {
   // workspace request UX
   const [requestingWorkspace, setRequestingWorkspace] = useState(false);
   const [workspaceRequestStatus, setWorkspaceRequestStatus] = useState('');
+  const [workspaceSlugSuggestion, setWorkspaceSlugSuggestion] = useState('');
+  const [workspaceNote, setWorkspaceNote] = useState('');
 
   // Redirect to /login if not logged in
   useEffect(() => {
@@ -943,11 +945,14 @@ function DashboardPage() {
     return null;
   }
 
-    const handleRequestWorkspace = async () => {
+  const handleRequestWorkspace = async () => {
     setWorkspaceRequestStatus('');
     setRequestingWorkspace(true);
     try {
-      const data = await requestWorkspace(null);
+      const data = await requestWorkspace(
+        workspaceNote || null,
+        workspaceSlugSuggestion || null
+      );
       if (data.alreadyPending) {
         setWorkspaceRequestStatus('You already have a pending workspace request.');
       } else {
@@ -962,6 +967,7 @@ function DashboardPage() {
       setRequestingWorkspace(false);
     }
   };
+
 
   const spaces = me.spaces || [];
 
@@ -997,7 +1003,7 @@ return (
             style={{
               fontSize: 14,
               color: 'var(--text-muted)',
-              maxWidth: 360,
+              maxWidth: 420,
               textAlign: 'center',
               padding: '16px'
             }}
@@ -1006,8 +1012,66 @@ return (
               No spaces assigned to you yet.
             </div>
             <div style={{ marginBottom: 12 }}>
-              Please request a new workspace to continue building your Portals iFrames!
+              You can request a new workspace for your Portals overlays. An admin will review and
+              create a space for you.
             </div>
+
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 8,
+                marginBottom: 10,
+                textAlign: 'left'
+              }}
+            >
+              <label style={{ fontSize: 12 }}>
+                Suggested slug (optional)
+                <input
+                  type="text"
+                  value={workspaceSlugSuggestion}
+                  onChange={(e) =>
+                    setWorkspaceSlugSuggestion(e.target.value.toLowerCase())
+                  }
+                  placeholder="e.g. scott-hud"
+                  style={{
+                    marginTop: 4,
+                    width: '100%',
+                    borderRadius: 999,
+                    border: '1px solid var(--panel-border)',
+                    background: '#020617',
+                    color: 'var(--text-main)',
+                    padding: '6px 10px',
+                    fontSize: 13
+                  }}
+                />
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                  3–32 chars; lowercase letters, digits, hyphens only.
+                </div>
+              </label>
+
+              <label style={{ fontSize: 12 }}>
+                Note for admin (optional)
+                <textarea
+                  value={workspaceNote}
+                  onChange={(e) => setWorkspaceNote(e.target.value)}
+                  placeholder="e.g. HUD overlays for my Portals game."
+                  style={{
+                    marginTop: 4,
+                    width: '100%',
+                    minHeight: 60,
+                    borderRadius: 8,
+                    border: '1px solid var(--panel-border)',
+                    background: '#020617',
+                    color: 'var(--text-main)',
+                    padding: '6px 10px',
+                    fontSize: 13,
+                    resize: 'vertical'
+                  }}
+                />
+              </label>
+            </div>
+
             <button
               className="button primary"
               type="button"
@@ -1030,6 +1094,7 @@ return (
           </div>
         </div>
       )}
+
 
   </LayoutShell>
 );
@@ -1088,10 +1153,16 @@ function AdminDashboard() {
     const req = requests.find((r) => r.id === reqId);
     if (!req) return;
 
+    const defaultSlug =
+      (req.suggestedSlug && req.suggestedSlug.toLowerCase()) ||
+      ((req.email || '').split('@')[0].replace(/[^a-z0-9-]/g, '-') || '');
+
     const slugInput = window.prompt(
       'Enter space slug (lowercase letters, digits, hyphens).',
-      (req.email || '').split('@')[0].replace(/[^a-z0-9-]/g, '-') || ''
+      defaultSlug
     );
+
+
     if (!slugInput) return;
 
     const slug = slugInput.trim();
