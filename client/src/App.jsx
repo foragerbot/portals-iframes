@@ -11,7 +11,8 @@ import {
   deleteSpaceFile,
   renameSpaceFile,
   uploadSpaceAssets,
-  deleteSpaceAsset 
+  deleteSpaceAsset,
+  requestWorkspace
 } from './api.js';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -72,8 +73,7 @@ function LoginPage() {
       <div className="login-card">
         <h1>Sign in to Portals iFrames @ Jawn.Bot</h1>
         <p>
-          Enter your email and we&apos;ll send a magic link. No passwords. After clicking the link,
-          come back here and refresh.
+          Enter your email where we can send a login link. Click the link in the email to open your iFrame builder workspace.
         </p>
         <form onSubmit={onSubmit}>
           <input
@@ -885,6 +885,10 @@ function DashboardPage() {
   const [showEditor, setShowEditor] = useState(true);
   const [showGpt, setShowGpt] = useState(true);
 
+  // workspace request UX
+  const [requestingWorkspace, setRequestingWorkspace] = useState(false);
+  const [workspaceRequestStatus, setWorkspaceRequestStatus] = useState('');
+
   // Redirect to /login if not logged in
   useEffect(() => {
     if (!loading && !me) {
@@ -936,6 +940,26 @@ function DashboardPage() {
     return null;
   }
 
+    const handleRequestWorkspace = async () => {
+    setWorkspaceRequestStatus('');
+    setRequestingWorkspace(true);
+    try {
+      const data = await requestWorkspace(null);
+      if (data.alreadyPending) {
+        setWorkspaceRequestStatus('You already have a pending workspace request.');
+      } else {
+        setWorkspaceRequestStatus('Request sent. An admin will review it soon.');
+      }
+    } catch (err) {
+      console.error(err);
+      setWorkspaceRequestStatus(
+        err.payload?.message || 'Failed to submit workspace request.'
+      );
+    } finally {
+      setRequestingWorkspace(false);
+    }
+  };
+
   const spaces = me.spaces || [];
 
 return (
@@ -964,13 +988,46 @@ return (
         showGpt={showGpt}
         onUsageRefresh={() => refreshUsage(activeSlug)}
       />
-    ) : (
-      <div className="app-content" style={{ alignItems: 'center', justifyContent: 'center' }}>
-        <div style={{ fontSize: 14, color: 'var(--text-muted)' }}>
-          No spaces assigned to you yet. Ask the admin to create one.
+      ) : (
+        <div className="app-content" style={{ alignItems: 'center', justifyContent: 'center' }}>
+          <div
+            style={{
+              fontSize: 14,
+              color: 'var(--text-muted)',
+              maxWidth: 360,
+              textAlign: 'center',
+              padding: '16px'
+            }}
+          >
+            <div style={{ marginBottom: 8 }}>
+              No spaces assigned to you yet.
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              Please request a new workspace to continue building your Portals iFrames!
+            </div>
+            <button
+              className="button primary"
+              type="button"
+              onClick={handleRequestWorkspace}
+              disabled={requestingWorkspace}
+            >
+              {requestingWorkspace ? 'Requesting…' : 'Request workspace'}
+            </button>
+            {workspaceRequestStatus && (
+              <div
+                style={{
+                  marginTop: 8,
+                  fontSize: 12,
+                  color: 'var(--text-muted)'
+                }}
+              >
+                {workspaceRequestStatus}
+              </div>
+            )}
+          </div>
         </div>
-      </div>
-    )}
+      )}
+
   </LayoutShell>
 );
 

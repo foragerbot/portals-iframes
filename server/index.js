@@ -43,6 +43,7 @@ const USERS_META_PATH = path.join(ROOT_DIR, 'users.meta.json');
 const TOKENS_META_PATH = path.join(ROOT_DIR, 'magicTokens.meta.json');
 const SESSIONS_META_PATH = path.join(ROOT_DIR, 'sessions.meta.json');
 const APPROVED_USERS_PATH = path.join(ROOT_DIR, 'approvedUsers.meta.json');
+const WORKSPACE_REQUESTS_PATH = path.join(ROOT_DIR, 'workspaceRequests.meta.json');
 
 // OpenAI client
 const openai = process.env.OPENAI_API_KEY
@@ -134,6 +135,7 @@ function pickModel(requested) {
 function generateId(prefix = '') {
   return prefix + crypto.randomBytes(16).toString('hex');
 }
+
 
 async function readJsonArray(filePath) {
   try {
@@ -345,6 +347,14 @@ async function loadUsersMeta() {
 
 async function loadApprovedUsers() {
   return readJsonArray(APPROVED_USERS_PATH);
+}
+
+async function loadWorkspaceRequests() {
+  return readJsonArray(WORKSPACE_REQUESTS_PATH);
+}
+
+async function saveWorkspaceRequests(reqs) {
+  return writeJsonArray(WORKSPACE_REQUESTS_PATH, reqs);
 }
 
 async function isEmailApproved(email) {
@@ -1458,6 +1468,56 @@ app.get('/api/spaces/:slug/usage', requireUser, async (req, res, next) => {
   }
 });
 
+// User-facing: request a new workspace / space
+// POST /api/spaces/request
+// body: { note?: string }
+app.post('/api/spaces/request', requireUser, async (req, res, next) => {
+  try {
+    const note = (req.body?.note || '').toString().trim();
+    const now = new Date();
+
+    const requests = await loadWorkspaceRequests();
+
+    // If there's already a pending request for this user, don't spam
+    const existing = requests.find(
+      (r) => r.userId === req.user.id && r.status === 'pending'
+    );
+    if (existing) {
+      return res.json({
+        ok: true,
+        alreadyPending: true,
+        request: existing
+      });
+    }
+
+    const reqRecord = {
+      id: generateId('wr_'),
+      userId: req.user.id,
+      email: req.user.email,
+      status: 'pending', // 'pending' | 'approved' | 'rejected'
+      note: note || null,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString()
+    };
+
+    requests.push(reqRecord);
+    await saveWorkspaceRequests(requests);
+
+    console.log('[workspace-requests] new request', {
+      id: reqRecord.id,
+      userId: reqRecord.userId,
+      email: reqRecord.email
+    });
+
+    res.status(201).json({
+      ok: true,
+      request: reqRecord
+    });
+  } catch (err) {
+    console.error('[workspace-requests] error creating request', err);
+    next(err);
+  }
+});
 
 // ───────────────── Admin routes (manual provisioning) ─────────────────
 
@@ -1560,7 +1620,7 @@ app.post('/api/admin/spaces', requireAdmin, async (req, res, next) => {
 <body>
   <div class="hud">
     <p class="hud-title">Space: ${slug}</p>
-    <p class="hud-body">Overlay is alive. Wire this up as an iframe in your Portals scene.</p>
+    <p class="hud-body">Overlay is alive. Wire this up as an iFrame in your Portals space!</p>
   </div>
 </body>
 </html>
@@ -1594,6 +1654,25 @@ app.post('/api/admin/spaces', requireAdmin, async (req, res, next) => {
     });
   } catch (err) {
     console.error('[admin] error creating space:', err);
+    next(err);
+  }
+});
+
+// Admin: list workspace requests
+// GET /api/admin/space-requests?status=pending|approved|rejected
+app.get('/api/admin/space-requests', requireAdmin, async (req, res, next) => {
+  try {
+    const statusFilter = (req.query?.status || '').toString().trim();
+    const reqs = await loadWorkspaceRequests();
+
+    const filtered =
+      statusFilter && ['pending', 'approved', 'rejected'].includes(statusFilter)
+        ? reqs.filter((r) => r.status === statusFilter)
+        : reqs;
+
+    res.json({ ok: true, requests: filtered });
+  } catch (err) {
+    console.error('[workspace-requests] error listing requests', err);
     next(err);
   }
 });

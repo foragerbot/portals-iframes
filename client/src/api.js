@@ -123,3 +123,10 @@ export function deleteSpaceAsset(slug, relPath) {
     body: JSON.stringify({ path: relPath })
   });
 }
+
+export function requestWorkspace(note) {
+  return request('/api/spaces/request', {
+    method: 'POST',
+    body: JSON.stringify({ note })
+  });
+}
