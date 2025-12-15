@@ -1,23 +1,28 @@
 :root {
-  --bg-main: #020617;
-  --bg-elevated: #020617;
+  --bg-main: #e2e2e2;
+  --bg-elevated: #32343b;
   --panel-border: #1f2937;
-  --panel-soft: #020617;
+  --panel-soft: #b9bdcb;
 
   --accent-primary: #22d3ee;
   --accent-secondary: #a855f7;
   --accent-soft: rgba(34, 211, 238, 0.12);
 
-  --text-main: #e5e7eb;
-  --text-muted: #9ca3af;
+  --text-main: #000000;
+  --text-muted: #6c7589;
+  --text-light: #e2e2e2;
+  --button-alt: #abd4ec;
+
+  --code-bg: #000000;
+  --code-text: #ffffff;
 
   --danger: #f97373;
-  --ok: #4ade80;
+  --ok: #0c4dcd;
 
   --radius-md: 10px;
   --radius-lg: 14px;
 
-  --shadow-soft: 0 0 32px rgba(34, 211, 238, 0.25);
+  --shadow-soft: 0 0 20px rgba(34, 211, 238, 0.2);
 
   --font-main: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
@@ -38,8 +43,8 @@ body,
 }
 
 body {
-  background: radial-gradient(circle at top, #0b1120 0, #020617 55%, #000 100%);
-  color: var(--text-main);
+  background: var(  --bg-main);
+    color: var(--text-main);
   font-family: var(--font-main);
 }
 
@@ -47,19 +52,21 @@ body {
 
 .app-shell {
   min-height: 100vh;
+  max-height: 100vh;
   display: flex;
   flex-direction: column;
 }
 
 .app-header {
-  height: 56px;
+  height: 50px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 18px;
   border-bottom: 1px solid var(--panel-border);
-  background: radial-gradient(circle at top left, rgba(34, 211, 238, 0.16), transparent 55%),
-    rgba(15, 23, 42, 0.92);
+  /*background: radial-gradient(circle at top left, rgba(34, 211, 238, 0.16), transparent 55%),
+    rgba(15, 23, 42, 0.92);*/
+    background: var(--bg-elevated);
   backdrop-filter: blur(12px);
 }
 
@@ -79,7 +86,7 @@ body {
 
 .app-header-title span {
   font-size: 12px;
-  color: var(--text-muted);
+  color: var(--text-light);
 }
 
 .app-header-right {
@@ -92,18 +99,18 @@ body {
   font-size: 11px;
   padding: 4px 10px;
   border-radius: 999px;
-  border: 1px solid rgba(148, 163, 184, 0.6);
-  background: rgba(15, 23, 42, 0.7);
-  color: var(--text-muted);
+  border: 1px solid var(--accent-secondary);
+  background: var(--button-alt);
+  color: var(--text-main);
 }
 
 .badge-pill.ok {
-  border-color: rgba(74, 222, 128, 0.7);
+  border-color: var(--ok);
   color: var(--ok);
 }
 
 .badge-pill.warn {
-  border-color: rgba(248, 113, 113, 0.7);
+  border-color: var(--danger);
   color: var(--danger);
 }
 
@@ -118,8 +125,7 @@ body {
 .app-sidebar {
   width: 260px;
   border-right: 1px solid var(--panel-border);
-  background: radial-gradient(circle at top, rgba(34, 211, 238, 0.14), transparent 60%),
-    rgba(15, 23, 42, 0.95);
+  background: var(  --bg-main);
   padding: 14px 12px;
   display: flex;
   flex-direction: column;
@@ -129,7 +135,7 @@ body {
 .sidebar-section {
   border-radius: var(--radius-md);
   border: 1px solid var(--panel-border);
-  background: rgba(15, 23, 42, 0.9);
+  background: var(  --bg-main);
   padding: 10px;
 }
 
@@ -137,7 +143,7 @@ body {
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.14em;
-  color: var(--text-muted);
+  color: var(--text-main);
   margin: 0 0 8px;
 }
 
@@ -156,7 +162,7 @@ body {
   border-radius: 8px;
   padding: 7px 9px;
   border: 1px solid transparent;
-  background: rgba(15, 23, 42, 0.7);
+  background: (15, 23, 42, 0.7);
   cursor: pointer;
   display: flex;
   flex-direction: column;
@@ -174,7 +180,7 @@ body {
 
 .space-item-meta {
   font-size: 11px;
-  color: var(--text-muted);
+  color: var(--text-main);
 }
 
 /* Main editor area */
@@ -201,8 +207,8 @@ body {
 .panel {
   border-radius: var(--radius-lg);
   border: 1px solid var(--panel-border);
-  background: rgba(15, 23, 42, 0.88);
-  padding: 10px;
+  background: var(  --bg-main);
+    padding: 10px;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -224,7 +230,7 @@ body {
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.14em;
-  color: var(--text-muted);
+  color: var(--text-main);
 }
 
 .panel-subtitle {
@@ -234,10 +240,10 @@ body {
 
 .panel-toggle {
   border: none;
-  background: rgba(15, 23, 42, 0.9);
+  background: var(  --bg-main);
   border-radius: 999px;
-  border: 1px solid var(--panel-border);
-  color: var(--text-muted);
+  border: 1px solid var(--accent-secondary);
+  color: var(--text-main);
   font-size: 10px;
   padding: 4px 7px;
   cursor: pointer;
@@ -247,8 +253,8 @@ body {
 }
 
 .panel-toggle:hover {
-  border-color: rgba(34, 211, 238, 0.8);
-  color: var(--accent-primary);
+  border-color: var(--danger);
+  color: var(--panel-border);
 }
 
 .panel-toggle span {
@@ -258,7 +264,7 @@ body {
 
 /* Panels with roles */
 .panel--files {
-  flex: 0 0 220px;
+  flex: 0 0 200px;
   min-width: 180px;
 }
 
@@ -269,7 +275,7 @@ body {
 
 .panel--gpt {
   flex: 0 0 32%;
-  min-width: 260px;
+  min-width: 300px;
 }
 
 /* File list */
@@ -286,7 +292,7 @@ body {
   padding: 5px 6px;
   border-radius: 6px;
   cursor: pointer;
-  color: var(--text-muted);
+  color: var(--text-main);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -304,18 +310,18 @@ body {
 .file-item-rename {
   border: none;
   background: transparent;
-  color: #64748b;
+  color: var(--accent-secondary);
   font-size: 11px;
   padding: 0 4px;
   cursor: pointer;
 }
 
 .file-item-delete:hover {
-  color: #f97373;
+  color: var(--danger);
 }
 
 .file-item-rename:hover {
-  color: #22d3ee;
+  color: var(--accent-primary);
 }
 
 /* Editor textarea */
@@ -328,8 +334,8 @@ body {
     monospace;
   font-size: 12px;
   line-height: 1.4;
-  color: var(--text-main);
-  background: #020617;
+  color: var(--code-text);
+  background: var(--code-bg);
   border-radius: 8px;
   border: 1px solid var(--panel-border);
   padding: 8px;
@@ -349,12 +355,13 @@ body {
   justify-content: space-between;
   align-items: center;
   gap: 8px;
+  color: var(--text-main);
 }
 
 .button {
   border-radius: 999px;
   border: 1px solid var(--panel-border);
-  background: rgba(15, 23, 42, 0.9);
+  background: var(--button-alt);
   color: var(--text-main);
   font-size: 12px;
   padding: 6px 12px;
@@ -377,6 +384,7 @@ body {
 
 .button:disabled {
   opacity: 0.5;
+  color: var(--text-muted);
   cursor: default;
 }
 
@@ -388,21 +396,23 @@ body {
   border-radius: 8px;
   border: 1px solid var(--panel-border);
   padding: 8px;
-  background: #020617;
+  background: var(--code-bg);
   font-size: 12px;
+  color: var(--code-text);
 }
 
 .gpt-code {
   margin: 6px 0;
   padding: 6px 8px;
   border-radius: 6px;
-  background: #020617;
+  background: var(--code-bg);
   border: 1px solid #1f2937;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
     monospace;
   white-space: pre;
   overflow-x: auto;
   font-size: 11px;
+  color: var(--text-light);
 }
 
 .gpt-input {
@@ -419,8 +429,8 @@ body {
   resize: vertical;
   border-radius: 8px;
   border: 1px solid var(--panel-border);
-  background: #020617;
-  color: var(--text-main);
+  background: var(--code-bg);
+  color: var(--code-text);
   font-size: 12px;
   padding: 6px 8px;
   outline: none;
@@ -428,6 +438,10 @@ body {
 
 .gpt-input textarea:focus {
   border-color: var(--accent-primary);
+}
+
+.gpt-input textarea::placeholder {
+ color:var(--code-text);
 }
 
 /* Usage chip */
@@ -440,8 +454,8 @@ body {
   border-radius: 999px;
   border: 1px solid var(--panel-border);
   padding: 3px 8px;
-  background: rgba(15, 23, 42, 0.9);
-  color: var(--text-muted);
+  background: var(--button-alt);
+  color: var(--text-main);
 }
 
 .usage-bar {
@@ -459,7 +473,7 @@ body {
   left: 0;
   height: 100%;
   border-radius: 999px;
-  background: linear-gradient(to right, #22d3ee, #a855f7);
+  background: linear-gradient(to right, var(--accent-primary), var(--accent-secondary));
 }
 
 /* Auth/login */
@@ -560,7 +574,7 @@ body {
 .asset-delete-btn {
   border: none;
   background: transparent;
-  color: #64748b;
+  color: var(--accent-secondary);
   font-size: 10px;
   padding: 0 4px;
   cursor: pointer;
@@ -577,8 +591,8 @@ body {
 .preview-modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(15, 23, 42, 0.85);
-  display: flex;
+  background: var(--bg-main);
+    display: flex;
   align-items: center;
   justify-content: center;
   z-index: 9999;
@@ -587,8 +601,8 @@ body {
 .preview-modal {
   width: min(960px, 90vw);
   height: min(540px, 80vh);
-  background: #020617;
-  border-radius: 12px;
+  background: var(white);
+    border-radius: 12px;
   border: 1px solid var(--panel-border);
   box-shadow: 0 30px 80px rgba(15, 23, 42, 0.9);
   display: flex;

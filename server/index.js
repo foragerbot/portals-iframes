@@ -328,7 +328,7 @@ async function getSpaceUsage(space) {
 
   const quotaMb = Number.isFinite(Number(space.quotaMb))
     ? Number(space.quotaMb)
-    : 200;
+    : 100;
 
   const usedMb = +(usedBytes / (1024 * 1024)).toFixed(2);
 
@@ -765,7 +765,13 @@ app.use(
   })
 );
 
-// Before: app.use(cors({ origin: true, credentials: true }));
+const EDITOR_ORIGINS = new Set([
+  'https://iframes.jawn.bot',
+  // Dev origins:
+  'http://localhost:4100',
+  'http://localhost:5173',
+]);
+
 const ALLOWED_ORIGINS = [
   'https://iframes.jawn.bot',
   'http://localhost:4100', // dev UI
@@ -990,6 +996,24 @@ app.get('/api/me', async (req, res, next) => {
 });
 
 // ───────────────── Authenticated space file APIs ─────────────────
+
+function requireEditorOrigin(req, res, next) {
+  const origin = req.get('origin');
+
+  // Non-browser clients (curl, internal scripts) often send no Origin; allow them.
+  if (!origin) return next();
+
+  if (!EDITOR_ORIGINS.has(origin)) {
+    console.warn('[origin] blocked write from origin:', origin, 'to', req.method, req.originalUrl);
+    return res.status(403).json({
+      error: 'bad_origin',
+      message: 'This action is only allowed from the editor.',
+    });
+  }
+
+  next();
+}
+
 // List files in a space directory
 // GET /api/spaces/:slug/files?path=subdir/
 app.get('/api/spaces/:slug/files', requireUser, async (req, res, next) => {
@@ -1065,7 +1089,7 @@ app.get('/api/spaces/:slug/files', requireUser, async (req, res, next) => {
 
 // Get a single file's contents
 // GET /api/spaces/:slug/file?path=relative/path.ext
-app.get('/api/spaces/:slug/file', requireUser, async (req, res, next) => {
+app.get('/api/spaces/:slug/file', requireUser, requireEditorOrigin, async (req, res, next) => {
   try {
     await ensureSpacesRoot();
     const { slug } = req.params;
@@ -1107,7 +1131,7 @@ app.get('/api/spaces/:slug/file', requireUser, async (req, res, next) => {
 // Save a text file in a space
 // POST /api/spaces/:slug/file
 // body: { path, content }
-app.post('/api/spaces/:slug/file', requireUser, async (req, res, next) => {
+app.post('/api/spaces/:slug/file', requireUser, requireEditorOrigin, async (req, res, next) => {
   try {
     await ensureSpacesRoot();
     const { slug } = req.params;
@@ -1151,7 +1175,7 @@ app.post('/api/spaces/:slug/file', requireUser, async (req, res, next) => {
 // Delete a file in a space
 // DELETE /api/spaces/:slug/file
 // body: { path }
-app.delete('/api/spaces/:slug/file', requireUser, async (req, res, next) => {
+app.delete('/api/spaces/:slug/file', requireUser, requireEditorOrigin, async (req, res, next) => {
   try {
     await ensureSpacesRoot();
     const { slug } = req.params;
@@ -1198,7 +1222,7 @@ app.delete('/api/spaces/:slug/file', requireUser, async (req, res, next) => {
 // Rename a file in a space
 // POST /api/spaces/:slug/file/rename
 // body: { from, to }
-app.post('/api/spaces/:slug/file/rename', requireUser, async (req, res, next) => {
+app.post('/api/spaces/:slug/file/rename', requireUser, requireEditorOrigin, async (req, res, next) => {
   try {
     await ensureSpacesRoot();
     const { slug } = req.params;
@@ -1476,7 +1500,7 @@ chatMessages.push({
 //   subdir   -> optional subdirectory inside the space (e.g. "assets" or "assets/icons")
 app.post(
   '/api/spaces/:slug/upload',
-  requireUser,
+  requireUser, requireEditorOrigin,
   upload.array('files', MAX_ASSET_FILES),
   async (req, res, next) => {
     try {
@@ -1495,7 +1519,7 @@ app.post(
 
       const quotaMb = Number.isFinite(Number(space.quotaMb))
         ? Number(space.quotaMb)
-        : 200;
+        : 100;
       const quotaBytes = quotaMb * 1024 * 1024;
 
       const files = req.files || [];
@@ -1599,7 +1623,7 @@ app.post(
 // DELETE an asset (e.g. image) in a space
 // DELETE /api/spaces/:slug/asset
 // body: { path } where path starts with "assets/"
-app.delete('/api/spaces/:slug/asset', requireUser, async (req, res, next) => {
+app.delete('/api/spaces/:slug/asset', requireUser, requireEditorOrigin, async (req, res, next) => {
   try {
     await ensureSpacesRoot();
     const { slug } = req.params;
@@ -1705,7 +1729,7 @@ app.get('/api/spaces/:slug/usage', requireUser, async (req, res, next) => {
 // User-facing: request a new workspace / space
 // POST /api/spaces/request
 // body: { note?: string }
-app.post('/api/spaces/request', requireUser, async (req, res, next) => {
+app.post('/api/spaces/request', requireUser, requireEditorOrigin, async (req, res, next) => {
   try {
     const note = (req.body?.note || '').toString().trim();
     const suggestedSlugRaw = (req.body?.suggestedSlug || '').toString().trim();
@@ -1893,7 +1917,7 @@ app.post('/api/admin/spaces', requireAdmin, async (req, res, next) => {
       dirPath,
       quotaMb: Number.isFinite(Number(quotaMb))
         ? Number(quotaMb)
-        : 200, // default 200 MB
+        : 100, // default 100 MB
       createdAt: now,
       updatedAt: now,
       status: 'active',
@@ -1939,7 +1963,7 @@ app.get('/api/admin/space-requests', requireAdmin, async (req, res, next) => {
 // Admin: approve a workspace request and create a space for the user
 // POST /api/admin/space-requests/:id/approve
 // body: { slug, quotaMb? }
-app.post('/api/admin/space-requests/:id/approve', requireAdmin, async (req, res, next) => {
+app.post('/api/admin/space-requests/:id/approve', requireAdmin, requireEditorOrigin, async (req, res, next) => {
   try {
     const { id } = req.params;
     const rawSlug = (req.body?.slug || '').toString();
@@ -1959,7 +1983,7 @@ app.post('/api/admin/space-requests/:id/approve', requireAdmin, async (req, res,
     }
 
     const quotaMbRaw = req.body?.quotaMb;
-    const quotaMb = Number.isFinite(Number(quotaMbRaw)) ? Number(quotaMbRaw) : 200;
+    const quotaMb = Number.isFinite(Number(quotaMbRaw)) ? Number(quotaMbRaw) : 100;
 
     const requests = await loadWorkspaceRequests();
     const idx = requests.findIndex((r) => r.id === id);

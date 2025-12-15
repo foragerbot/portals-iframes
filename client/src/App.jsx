@@ -23,6 +23,10 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { normalizeSlug, isValidSlug } from './slugUtils'; // ⬅️ ADD THIS
 
+const IFRAME_ORIGIN =
+  import.meta.env.VITE_IFRAME_ORIGIN ||
+  window.location.origin.replace(/\/+$/, '');
+
 function useMe() {
   const [me, setMe] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -651,29 +655,31 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
       setGptBusy(false);
     }
   };
+  
+const onCopyIframeUrl = async () => {
+  if (!selectedPath) return;
 
-  const onCopyIframeUrl = async () => {
-    if (!selectedPath) return;
+  const url = `${IFRAME_ORIGIN}/p/${encodeURIComponent(slug)}/${encodeURIComponent(
+    selectedPath
+  )}`;
 
-    const origin = window.location.origin.replace(/\/+$/, '');
-    const url = `${origin}/p/${encodeURIComponent(slug)}/${encodeURIComponent(selectedPath)}`;
-
-    try {
-      setCopyingUrl(true);
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(url);
-      } else {
-        window.prompt('Copy iframe URL:', url);
-      }
-      setCopyStatus('Copied!');
-      setTimeout(() => setCopyStatus(''), 2000);
-    } catch (err) {
-      console.error(err);
-      window.alert('Failed to copy URL. Here it is:\n\n' + url);
-    } finally {
-      setCopyingUrl(false);
+  try {
+    setCopyingUrl(true);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(url);
+    } else {
+      window.prompt('Copy iframe URL:', url);
     }
-  };
+    setCopyStatus('Copied!');
+    setTimeout(() => setCopyStatus(''), 2000);
+  } catch (err) {
+    console.error(err);
+    window.alert('Failed to copy URL. Here it is:\n\n' + url);
+  } finally {
+    setCopyingUrl(false);
+  }
+};
+
 
   const handleOpenPreview = () => {
     if (!selectedPath) return;
@@ -685,6 +691,7 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
     setPreviewOpen(false);
   };
 
+  const newLocal = 'var(--code-text)';
   return (
     <>
       <div className="app-content">
@@ -876,7 +883,7 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
                     {gptResponse}
                   </ReactMarkdown>
                 ) : (
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                  <div style={{ fontSize: 12, color: 'var(--code-text)' }}>
                     Ask GPT to help refactor your HUD or generate snippets. It will see the current
                     file when a path is selected.
                   </div>
@@ -939,13 +946,14 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
               </button>
             </div>
             <div className="preview-modal-body">
-              <iframe
-                key={previewReloadKey}
-                src={`/p/${encodeURIComponent(slug)}/${encodeURIComponent(
-                  selectedPath
-                )}`}
-                title={`Preview ${slug}/${selectedPath}`}
-              />
+            <iframe
+              key={previewReloadKey}
+              src={`${IFRAME_ORIGIN}/p/${encodeURIComponent(slug)}/${encodeURIComponent(
+                selectedPath
+              )}`}
+              title={`Preview ${slug}/${selectedPath}`}
+            />
+
             </div>
           </div>
         </div>
@@ -1364,7 +1372,7 @@ function AdminDashboard() {
       return;
     }
 
-    const quotaMb = 200; // default quota
+    const quotaMb = 100; // default quota
 
     try {
       setStatusMsg(`Approving request for ${req.email}…`);
@@ -1406,8 +1414,8 @@ function AdminDashboard() {
       return;
     }
 
-    const quotaInput = window.prompt('Quota in MB (default 200):', '200');
-    const quotaMb = quotaInput ? Number(quotaInput) : 200;
+    const quotaInput = window.prompt('Quota in MB (default 100):', '100');
+    const quotaMb = quotaInput ? Number(quotaInput) : 100;
 
     try {
       setStatusMsg(`Approving request for ${req.email}…`);
