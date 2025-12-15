@@ -19,6 +19,9 @@ import {
   adminApproveSpaceRequest,
   adminRejectSpaceRequest,
   logout,
+  adminGetApprovedUsers,
+  adminAddApprovedUser,
+  adminRemoveApprovedUser,
 } from './api.js';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -1213,6 +1216,11 @@ function AdminDashboard() {
   const [slugEdits, setSlugEdits] = useState({});   // { [requestId]: currentSlug }
   const [slugErrors, setSlugErrors] = useState({}); // { [requestId]: errorMessage | null }
 
+  const [approvedUsers, setApprovedUsers] = useState([]);
+  const [allowlistLoading, setAllowlistLoading] = useState(false);
+  const [allowlistError, setAllowlistError] = useState('');
+  const [newAllowEmail, setNewAllowEmail] = useState('');
+
   const loadRequests = useCallback(
     async (token) => {
       if (!token) {
@@ -1259,8 +1267,37 @@ function AdminDashboard() {
   useEffect(() => {
     if (adminToken) {
       loadRequests(adminToken);
+      loadApproved(adminToken);
+    } else {
+      setRequests([]);
+      setApprovedUsers([]);
     }
-  }, [adminToken, loadRequests]);
+  }, [adminToken, loadRequests, loadApproved]);
+  const handleAddAllowEmail = async () => {
+    const email = newAllowEmail.trim();
+    if (!email) return;
+    try {
+      setAllowlistError('');
+      await adminAddApprovedUser(adminToken, email);
+      setNewAllowEmail('');
+      await loadApproved(adminToken);
+    } catch (err) {
+      console.error(err);
+      setAllowlistError(err.payload?.message || 'Failed to add email.');
+    }
+  };
+
+  const handleRemoveAllowEmail = async (email) => {
+    if (!window.confirm(`Remove "${email}" from allowlist?`)) return;
+    try {
+      setAllowlistError('');
+      await adminRemoveApprovedUser(adminToken, email);
+      await loadApproved(adminToken);
+    } catch (err) {
+      console.error(err);
+      setAllowlistError(err.payload?.message || 'Failed to remove email.');
+    }
+  };
 
   const handleSaveToken = (e) => {
     e.preventDefault();
@@ -1271,6 +1308,27 @@ function AdminDashboard() {
     localStorage.setItem('adminToken', token);
     loadRequests(token);
   };
+
+  const loadApproved = useCallback(
+    async (token) => {
+      if (!token) {
+        setApprovedUsers([]);
+        return;
+      }
+      setAllowlistLoading(true);
+      setAllowlistError('');
+      try {
+        const data = await adminGetApprovedUsers(token);
+        setApprovedUsers(data.users || []);
+      } catch (err) {
+        console.error(err);
+        setAllowlistError(err.payload?.message || 'Failed to load allowlist.');
+      } finally {
+        setAllowlistLoading(false);
+      }
+    },
+    []
+  );
 
   const handleSlugChange = (reqId, rawInput) => {
     // live-normalize so what you see is what the server will get
@@ -1465,7 +1523,113 @@ function AdminDashboard() {
             </button>
           </div>
         </form>
+{/* Allowlist panel */}
+        <div
+          style={{
+            marginBottom: 12,
+            padding: 8,
+            borderRadius: 8,
+            border: '1px solid var(--panel-border)',
+            background: 'rgba(15,23,42,0.9)',
+          }}
+        >
+          <h2 style={{ fontSize: 14, margin: '0 0 6px' }}>Approved emails</h2>
+          <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '0 0 8px' }}>
+            Only emails on this allowlist can receive magic-link logins.
+          </p>
 
+          <div
+            style={{
+              display: 'flex',
+              gap: 8,
+              marginBottom: 8,
+              alignItems: 'center',
+              flexWrap: 'wrap',
+            }}
+          >
+            <input
+              type="email"
+              placeholder="new-user@example.com"
+              value={newAllowEmail}
+              onChange={(e) => setNewAllowEmail(e.target.value)}
+              style={{
+                flex: '1 1 200px',
+                minWidth: 0,
+                borderRadius: 999,
+                border: '1px solid var(--panel-border)',
+                background: '#020617',
+                color: 'var(--text-main)',
+                padding: '6px 10px',
+                fontSize: 13,
+              }}
+            />
+            <button
+              type="button"
+              className="button small"
+              onClick={handleAddAllowEmail}
+              disabled={!newAllowEmail.trim()}
+            >
+              Add email
+            </button>
+          </div>
+
+          {allowlistLoading ? (
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+              Loading allowlist…
+            </div>
+          ) : approvedUsers.length === 0 ? (
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+              No approved emails yet. Add at least one to allow logins.
+            </div>
+          ) : (
+            <ul
+              style={{
+                listStyle: 'none',
+                padding: 0,
+                margin: 0,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 4,
+                maxHeight: 160,
+                overflowY: 'auto',
+              }}
+            >
+              {approvedUsers.map((u) => (
+                <li
+                  key={u.email}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    fontSize: 12,
+                  }}
+                >
+                  <div>
+                    <span style={{ color: 'var(--text-main)' }}>{u.email}</span>
+                    {u.createdAt && (
+                      <span style={{ color: 'var(--text-muted)', marginLeft: 6 }}>
+                        · {u.createdAt}
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    className="button small"
+                    onClick={() => handleRemoveAllowEmail(u.email)}
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {allowlistError && (
+            <div style={{ marginTop: 6, fontSize: 12, color: '#f97373' }}>
+              {allowlistError}
+            </div>
+          )}
+        </div>
         {loading && (
           <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
             Loading pending requests…

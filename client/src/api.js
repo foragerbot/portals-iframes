@@ -172,3 +172,32 @@ export function logout() {
     method: 'POST',
   });
 }
+
+export function adminGetApprovedUsers(adminToken) {
+  return request('/api/admin/approved-users', {
+    method: 'GET',
+    headers: {
+      'x-admin-token': adminToken,
+    },
+  });
+}
+
+export function adminAddApprovedUser(adminToken, email) {
+  return request('/api/admin/approved-users', {
+    method: 'POST',
+    headers: {
+      'x-admin-token': adminToken,
+    },
+    body: JSON.stringify({ email }),
+  });
+}
+
+export function adminRemoveApprovedUser(adminToken, email) {
+  return request('/api/admin/approved-users', {
+    method: 'DELETE',
+    headers: {
+      'x-admin-token': adminToken,
+    },
+    body: JSON.stringify({ email }),
+  });
+}

@@ -350,6 +350,10 @@ async function loadApprovedUsers() {
   return readJsonArray(APPROVED_USERS_PATH);
 }
 
+async function saveApprovedUsers(list) {
+  return writeJsonArray(APPROVED_USERS_PATH, list);
+}
+
 async function loadWorkspaceRequests() {
   return readJsonArray(WORKSPACE_REQUESTS_PATH);
 }
@@ -2200,6 +2204,97 @@ app.use('/p/:slug', portalsEmbedHeaders, async (req, res, next) => {
       }
     });
   } catch (err) {
+    next(err);
+  }
+});
+
+// Admin: list approved emails (allowlist)
+// GET /api/admin/approved-users
+app.get('/api/admin/approved-users', requireAdmin, async (req, res, next) => {
+  try {
+    const users = await loadApprovedUsers();
+    res.json({ ok: true, users });
+  } catch (err) {
+    console.error('[allowlist] error listing approved users', err);
+    next(err);
+  }
+});
+
+// Admin: add an email to the allowlist
+// POST /api/admin/approved-users
+// body: { email }
+app.post('/api/admin/approved-users', requireAdmin, async (req, res, next) => {
+  try {
+    const rawEmail = (req.body?.email || '').toString().trim().toLowerCase();
+
+    if (!isValidEmail(rawEmail)) {
+      return res.status(400).json({
+        error: 'bad_email',
+        message: 'Invalid email address',
+      });
+    }
+
+    const list = await loadApprovedUsers();
+    const exists = list.some(
+      (u) => (u.email || '').trim().toLowerCase() === rawEmail
+    );
+    if (exists) {
+      return res.status(409).json({
+        error: 'already_approved',
+        message: 'Email is already on the allowlist',
+      });
+    }
+
+    const entry = {
+      email: rawEmail,
+      createdAt: new Date().toISOString(),
+    };
+
+    list.push(entry);
+    await saveApprovedUsers(list);
+
+    console.log('[allowlist] added', rawEmail);
+
+    res.status(201).json({ ok: true, user: entry });
+  } catch (err) {
+    console.error('[allowlist] error adding approved user', err);
+    next(err);
+  }
+});
+
+// Admin: remove an email from the allowlist
+// DELETE /api/admin/approved-users
+// body: { email }
+app.delete('/api/admin/approved-users', requireAdmin, async (req, res, next) => {
+  try {
+    const rawEmail = (req.body?.email || '').toString().trim().toLowerCase();
+
+    if (!isValidEmail(rawEmail)) {
+      return res.status(400).json({
+        error: 'bad_email',
+        message: 'Invalid email address',
+      });
+    }
+
+    const list = await loadApprovedUsers();
+    const next = list.filter(
+      (u) => (u.email || '').trim().toLowerCase() !== rawEmail
+    );
+
+    if (next.length === list.length) {
+      return res.status(404).json({
+        error: 'not_found',
+        message: 'Email not found on allowlist',
+      });
+    }
+
+    await saveApprovedUsers(next);
+
+    console.log('[allowlist] removed', rawEmail);
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[allowlist] error removing approved user', err);
     next(err);
   }
 });
