@@ -1,3 +1,5 @@
+//client/src/App.jsx
+
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Routes, Route, useNavigate, useLocation, Navigate } from 'react-router-dom';
 import {
@@ -19,6 +21,7 @@ import {
 } from './api.js';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { normalizeSlug, isValidSlug } from './slugUtils'; // ⬅️ ADD THIS
 
 function useMe() {
   const [me, setMe] = useState(null);
@@ -443,11 +446,14 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
   const [copyingUrl, setCopyingUrl] = useState(false);
   const [copyStatus, setCopyStatus] = useState('');
 
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewReloadKey, setPreviewReloadKey] = useState(0);
+
   const loadFiles = useCallback(async () => {
     setFilesLoading(true);
     try {
       const data = await getSpaceFiles(slug, '.');
-      setFiles(data.items.filter((i) => !i.isDir));
+      setFiles((data.items || []).filter((i) => !i.isDir));
     } catch (err) {
       console.error(err);
     } finally {
@@ -669,211 +675,285 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
     }
   };
 
+  const handleOpenPreview = () => {
+    if (!selectedPath) return;
+    setPreviewReloadKey((k) => k + 1); // bump key so iframe reloads
+    setPreviewOpen(true);
+  };
+
+  const handleClosePreview = () => {
+    setPreviewOpen(false);
+  };
+
   return (
-    <div className="app-content">
-      <div className="editor-shell">
-        {/* Files panel */}
-        {showFiles && (
-          <div className="panel panel--files">
-            <div className="panel-header">
-              <div className="panel-header-left">
-                <div className="panel-title">Files</div>
-                <div className="panel-subtitle">
-                  {filesLoading ? 'Loading…' : `${files.length} files`}
+    <>
+      <div className="app-content">
+        <div className="editor-shell">
+          {/* Files panel */}
+          {showFiles && (
+            <div className="panel panel--files">
+              <div className="panel-header">
+                <div className="panel-header-left">
+                  <div className="panel-title">Files</div>
+                  <div className="panel-subtitle">
+                    {filesLoading ? 'Loading…' : `${files.length} files`}
+                  </div>
                 </div>
               </div>
-            </div>
 
-            <div className="panel-body-files">
-              <ul className="file-list">
-                {files.map((f) => (
-                  <li
-                    key={f.name}
-                    className={
-                      'file-item' + (selectedPath === f.name ? ' active' : '')
-                    }
-                    onClick={() => setSelectedPath(f.name)}
-                  >
-                    <span className="file-item-name">{f.name}</span>
-                    <span className="file-item-actions">
-                      <button
-                        type="button"
-                        className="file-item-rename"
-                        title="Rename file"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onRenameFile(f.name);
-                        }}
-                        disabled={renamingFile}
-                      >
-                        ✎
-                      </button>
-                      <button
-                        type="button"
-                        className="file-item-delete"
-                        title="Delete file"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onDeleteFile(f.name);
-                        }}
-                        disabled={deletingFile}
-                      >
-                        ✕
-                      </button>
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
+              <div className="panel-body-files">
+                <ul className="file-list">
+                  {files.map((f) => (
+                    <li
+                      key={f.name}
+                      className={
+                        'file-item' + (selectedPath === f.name ? ' active' : '')
+                      }
+                      onClick={() => setSelectedPath(f.name)}
+                    >
+                      <span className="file-item-name">{f.name}</span>
+                      <span className="file-item-actions">
+                        <button
+                          type="button"
+                          className="file-item-rename"
+                          title="Rename file"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onRenameFile(f.name);
+                          }}
+                          disabled={renamingFile}
+                        >
+                          ✎
+                        </button>
+                        <button
+                          type="button"
+                          className="file-item-delete"
+                          title="Delete file"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onDeleteFile(f.name);
+                          }}
+                          disabled={deletingFile}
+                        >
+                          ✕
+                        </button>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
 
-            <div style={{ marginTop: 8 }}>
-              <button
-                type="button"
-                className="button small full-width"
-                onClick={onNewFile}
-                disabled={creatingFile}
-              >
-                {creatingFile ? 'Creating…' : '+ New file'}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Editor panel */}
-        {showEditor && (
-          <div className="panel panel--editor">
-            <div className="panel-header">
-              <div className="panel-header-left">
-                <div className="panel-title">Editor</div>
-                <div className="panel-subtitle">{selectedPath || 'Select a file'}</div>
+              <div style={{ marginTop: 8 }}>
+                <button
+                  type="button"
+                  className="button small full-width"
+                  onClick={onNewFile}
+                  disabled={creatingFile}
+                >
+                  {creatingFile ? 'Creating…' : '+ New file'}
+                </button>
               </div>
             </div>
-            {fileLoading ? (
-              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Loading file…</div>
-            ) : (
-              <>
-                <textarea
-                  className="editor-textarea"
-                  value={fileContent}
-                  onChange={(e) => setFileContent(e.target.value)}
-                  spellCheck={false}
-                />
-                <div className="editor-actions">
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <button
-                      className="button primary"
-                      onClick={onSave}
-                      disabled={saving}
+          )}
+
+          {/* Editor panel */}
+          {showEditor && (
+            <div className="panel panel--editor">
+              <div className="panel-header">
+                <div className="panel-header-left">
+                  <div className="panel-title">Editor</div>
+                  <div className="panel-subtitle">{selectedPath || 'Select a file'}</div>
+                </div>
+              </div>
+              {fileLoading ? (
+                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                  Loading file…
+                </div>
+              ) : (
+                <>
+                  <textarea
+                    className="editor-textarea"
+                    value={fileContent}
+                    onChange={(e) => setFileContent(e.target.value)}
+                    spellCheck={false}
+                  />
+                  <div className="editor-actions">
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button
+                        className="button primary"
+                        onClick={onSave}
+                        disabled={saving}
+                      >
+                        {saving ? 'Saving…' : 'Save file'}
+                      </button>
+                      <button
+                        className="button small"
+                        type="button"
+                        onClick={onCopyIframeUrl}
+                        disabled={!selectedPath || copyingUrl}
+                      >
+                        {copyingUrl ? 'Copying…' : 'Copy iframe URL'}
+                      </button>
+                      <button
+                        className="button small"
+                        type="button"
+                        onClick={handleOpenPreview}
+                        disabled={!selectedPath}
+                      >
+                        Preview iframe
+                      </button>
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: 'var(--text-muted)',
+                        textAlign: 'right',
+                      }}
                     >
-                      {saving ? 'Saving…' : 'Save file'}
-                    </button>
-                    <button
-                      className="button small"
-                      type="button"
-                      onClick={onCopyIframeUrl}
-                      disabled={!selectedPath || copyingUrl}
-                    >
-                      {copyingUrl ? 'Copying…' : 'Copy iframe URL'}
-                    </button>
-                  </div>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'right' }}>
-                    {copyStatus
-                      ? copyStatus
-                      : (
+                      {copyStatus ? (
+                        copyStatus
+                      ) : (
                         <>
                           Changes live at <code>/p/{slug}/{selectedPath}</code>
                         </>
                       )}
+                    </div>
                   </div>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {/* GPT panel */}
-        {showGpt && (
-          <div className="panel panel--gpt">
-            <div className="panel-header">
-              <div className="panel-header-left">
-                <div className="panel-title">GPT helper</div>
-                <div className="panel-subtitle">
-                  Model: gpt-4.1-mini · File: {selectedPath || 'none'}
-                </div>
-              </div>
-            </div>
-            <div className="gpt-messages">
-              {gptResponse ? (
-                <ReactMarkdown
-                  className="gpt-markdown"
-                  remarkPlugins={[remarkGfm]}
-                  components={{
-                    code({ node, inline, className, children, ...props }) {
-                      if (inline) {
-                        return (
-                          <code className={className} {...props}>
-                            {children}
-                          </code>
-                        );
-                      }
-                      return (
-                        <pre className="gpt-code">
-                          <code className={className} {...props}>
-                            {children}
-                          </code>
-                        </pre>
-                      );
-                    },
-                    p({ node, children, ...props }) {
-                      return (
-                        <p style={{ margin: '0 0 6px', fontSize: 12 }} {...props}>
-                          {children}
-                        </p>
-                      );
-                    },
-                    li({ node, children, ...props }) {
-                      return (
-                        <li style={{ marginBottom: 4 }} {...props}>
-                          {children}
-                        </li>
-                      );
-                    }
-                  }}
-                >
-                  {gptResponse}
-                </ReactMarkdown>
-              ) : (
-                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                  Ask GPT to help refactor your HUD or generate snippets. It will see the current file
-                  when a path is selected.
-                </div>
+                </>
               )}
             </div>
-            <div className="gpt-input">
-              <textarea
-                placeholder="e.g. “Add a pulsing border around the HUD”"
-                value={gptPrompt}
-                onChange={(e) => setGptPrompt(e.target.value)}
-              />
-              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                <button
-                  className="button primary"
-                  onClick={onRunGpt}
-                  disabled={gptBusy || !gptPrompt.trim()}
+          )}
+
+          {/* GPT panel */}
+          {showGpt && (
+            <div className="panel panel--gpt">
+              <div className="panel-header">
+                <div className="panel-header-left">
+                  <div className="panel-title">GPT helper</div>
+                  <div className="panel-subtitle">
+                    Model: gpt-4.1-mini · File: {selectedPath || 'none'}
+                  </div>
+                </div>
+              </div>
+              <div className="gpt-messages">
+                {gptResponse ? (
+                  <ReactMarkdown
+                    className="gpt-markdown"
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      code({ inline, className, children, ...props }) {
+                        if (inline) {
+                          return (
+                            <code className={className} {...props}>
+                              {children}
+                            </code>
+                          );
+                        }
+                        return (
+                          <pre className="gpt-code">
+                            <code className={className} {...props}>
+                              {children}
+                            </code>
+                          </pre>
+                        );
+                      },
+                      p({ children, ...props }) {
+                        return (
+                          <p style={{ margin: '0 0 6px', fontSize: 12 }} {...props}>
+                            {children}
+                          </p>
+                        );
+                      },
+                      li({ children, ...props }) {
+                        return (
+                          <li style={{ marginBottom: 4 }} {...props}>
+                            {children}
+                          </li>
+                        );
+                      },
+                    }}
+                  >
+                    {gptResponse}
+                  </ReactMarkdown>
+                ) : (
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                    Ask GPT to help refactor your HUD or generate snippets. It will see the current
+                    file when a path is selected.
+                  </div>
+                )}
+              </div>
+              <div className="gpt-input">
+                <textarea
+                  placeholder="e.g. “Add a pulsing border around the HUD”"
+                  value={gptPrompt}
+                  onChange={(e) => setGptPrompt(e.target.value)}
+                />
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    gap: 8,
+                  }}
                 >
-                  {gptBusy ? 'Thinking…' : 'Ask GPT'}
-                </button>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                  Uses your daily GPT quota.
+                  <button
+                    className="button primary"
+                    onClick={onRunGpt}
+                    disabled={gptBusy || !gptPrompt.trim()}
+                  >
+                    {gptBusy ? 'Thinking…' : 'Ask GPT'}
+                  </button>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                    Uses your daily GPT quota.
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
-    </div>
+
+      {/* Iframe preview modal */}
+      {previewOpen && selectedPath && (
+        <div
+          className="preview-modal-backdrop"
+          onClick={handleClosePreview}
+        >
+          <div
+            className="preview-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="preview-modal-header">
+              <div>
+                <div className="preview-modal-title">Iframe preview</div>
+                <div className="preview-modal-subtitle">
+                  /p/{slug}/{selectedPath}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="preview-modal-close"
+                onClick={handleClosePreview}
+                aria-label="Close preview"
+              >
+                ×
+              </button>
+            </div>
+            <div className="preview-modal-body">
+              <iframe
+                key={previewReloadKey}
+                src={`/p/${encodeURIComponent(slug)}/${encodeURIComponent(
+                  selectedPath
+                )}`}
+                title={`Preview ${slug}/${selectedPath}`}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
+
 
 function DashboardPage() {
   const { me, loading } = useMe();
@@ -893,6 +973,8 @@ function DashboardPage() {
   const [workspaceRequestStatus, setWorkspaceRequestStatus] = useState('');
   const [workspaceSlugSuggestion, setWorkspaceSlugSuggestion] = useState('');
   const [workspaceNote, setWorkspaceNote] = useState('');
+
+  const [pendingRequest, setPendingRequest] = useState(null);
 
   // Redirect to /login if not logged in
   useEffect(() => {
@@ -953,6 +1035,16 @@ function DashboardPage() {
         workspaceNote || null,
         workspaceSlugSuggestion || null
       );
+
+      // data.request is present in both new + alreadyPending cases
+      if (data.request) {
+        setPendingRequest(data.request);
+
+        // reflect what the server actually stored
+        setWorkspaceSlugSuggestion(data.request.suggestedSlug || '');
+        setWorkspaceNote(data.request.note || '');
+      }
+
       if (data.alreadyPending) {
         setWorkspaceRequestStatus('You already have a pending workspace request.');
       } else {
@@ -1016,70 +1108,113 @@ return (
               create a space for you.
             </div>
 
-            <div
-              style={{
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 8,
-                marginBottom: 10,
-                textAlign: 'left'
-              }}
-            >
-              <label style={{ fontSize: 12 }}>
-                Suggested slug (optional)
-                <input
-                  type="text"
-                  value={workspaceSlugSuggestion}
-                  onChange={(e) =>
-                    setWorkspaceSlugSuggestion(e.target.value.toLowerCase())
-                  }
-                  placeholder="e.g. scott-hud"
-                  style={{
-                    marginTop: 4,
-                    width: '100%',
-                    borderRadius: 999,
-                    border: '1px solid var(--panel-border)',
-                    background: '#020617',
-                    color: 'var(--text-main)',
-                    padding: '6px 10px',
-                    fontSize: 13
-                  }}
-                />
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
-                  3–32 chars; lowercase letters, digits, hyphens only.
+            {/* ⬇️ If there is a pending request, show it read-only */}
+            {pendingRequest ? (
+              <div
+                style={{
+                  textAlign: 'left',
+                  marginBottom: 12,
+                  padding: 10,
+                  borderRadius: 8,
+                  border: '1px solid var(--panel-border)',
+                  background: 'rgba(15,23,42,0.9)'
+                }}
+              >
+                <div style={{ fontSize: 12, marginBottom: 6, color: 'var(--text-main)' }}>
+                  <strong>Pending workspace request</strong>
                 </div>
-              </label>
-
-              <label style={{ fontSize: 12 }}>
-                Note for admin (optional)
-                <textarea
-                  value={workspaceNote}
-                  onChange={(e) => setWorkspaceNote(e.target.value)}
-                  placeholder="e.g. HUD overlays for my Portals game."
+                <div style={{ fontSize: 12, marginBottom: 4 }}>
+                  <span style={{ color: 'var(--text-muted)' }}>Requested on:</span>{' '}
+                  <span style={{ color: 'var(--text-main)' }}>
+                    {pendingRequest.createdAt}
+                  </span>
+                </div>
+                {pendingRequest.suggestedSlug && (
+                  <div style={{ fontSize: 12, marginBottom: 4 }}>
+                    <span style={{ color: 'var(--text-muted)' }}>Suggested slug:</span>{' '}
+                    <code>{pendingRequest.suggestedSlug}</code>
+                  </div>
+                )}
+                {pendingRequest.note && (
+                  <div style={{ fontSize: 12, marginBottom: 4 }}>
+                    <span style={{ color: 'var(--text-muted)' }}>Note:</span>{' '}
+                    <span style={{ color: 'var(--text-main)' }}>{pendingRequest.note}</span>
+                  </div>
+                )}
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
+                  Status: <strong>pending</strong>. To change details, contact an admin.
+                </div>
+              </div>
+            ) : (
+              <>
+                {/* Original form stays only when no pendingRequest */}
+                <div
                   style={{
-                    marginTop: 4,
-                    width: '100%',
-                    minHeight: 60,
-                    borderRadius: 8,
-                    border: '1px solid var(--panel-border)',
-                    background: '#020617',
-                    color: 'var(--text-main)',
-                    padding: '6px 10px',
-                    fontSize: 13,
-                    resize: 'vertical'
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 8,
+                    marginBottom: 10,
+                    textAlign: 'left'
                   }}
-                />
-              </label>
-            </div>
+                >
+                  <label style={{ fontSize: 12 }}>
+                    Suggested slug (optional)
+                    <input
+                      type="text"
+                      value={workspaceSlugSuggestion}
+                      onChange={(e) =>
+                        setWorkspaceSlugSuggestion(e.target.value.toLowerCase())
+                      }
+                      placeholder="e.g. scott-hud"
+                      style={{
+                        marginTop: 4,
+                        width: '100%',
+                        borderRadius: 999,
+                        border: '1px solid var(--panel-border)',
+                        background: '#020617',
+                        color: 'var(--text-main)',
+                        padding: '6px 10px',
+                        fontSize: 13
+                      }}
+                    />
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                      3–32 chars; lowercase letters, digits, hyphens only.
+                    </div>
+                  </label>
 
-            <button
-              className="button primary"
-              type="button"
-              onClick={handleRequestWorkspace}
-              disabled={requestingWorkspace}
-            >
-              {requestingWorkspace ? 'Requesting…' : 'Request workspace'}
-            </button>
+                  <label style={{ fontSize: 12 }}>
+                    Note for admin (optional)
+                    <textarea
+                      value={workspaceNote}
+                      onChange={(e) => setWorkspaceNote(e.target.value)}
+                      placeholder="e.g. HUD overlays for my Portals game."
+                      style={{
+                        marginTop: 4,
+                        width: '100%',
+                        minHeight: 60,
+                        borderRadius: 8,
+                        border: '1px solid var(--panel-border)',
+                        background: '#020617',
+                        color: 'var(--text-main)',
+                        padding: '6px 10px',
+                        fontSize: 13,
+                        resize: 'vertical'
+                      }}
+                    />
+                  </label>
+                </div>
+
+                <button
+                  className="button primary"
+                  type="button"
+                  onClick={handleRequestWorkspace}
+                  disabled={requestingWorkspace}
+                >
+                  {requestingWorkspace ? 'Requesting…' : 'Request workspace'}
+                </button>
+              </>
+            )}
+
             {workspaceRequestStatus && (
               <div
                 style={{
@@ -1111,6 +1246,10 @@ function AdminDashboard() {
   const [statusMsg, setStatusMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
 
+  // inline slug editing per request
+  const [slugEdits, setSlugEdits] = useState({});   // { [requestId]: currentSlug }
+  const [slugErrors, setSlugErrors] = useState({}); // { [requestId]: errorMessage | null }
+
   const loadRequests = useCallback(
     async (token) => {
       if (!token) {
@@ -1121,8 +1260,29 @@ function AdminDashboard() {
       setErrorMsg('');
       try {
         const data = await adminGetSpaceRequests(token, 'pending');
-        setRequests(data.requests || []);
-        setStatusMsg(`Loaded ${data.requests?.length || 0} pending request(s).`);
+        const reqs = data.requests || [];
+        setRequests(reqs);
+        setStatusMsg(`Loaded ${reqs.length || 0} pending request(s).`);
+
+        // initialize slug inputs for each request
+        setSlugEdits((prev) => {
+          const next = { ...prev };
+          for (const r of reqs) {
+            const base =
+              (r.suggestedSlug && r.suggestedSlug.toLowerCase()) ||
+              ((r.email || '')
+                .split('@')[0]
+                .replace(/[^a-z0-9-]/g, '-') || '');
+            if (!next[r.id]) {
+              // normalize to show exactly what will go to the server
+              next[r.id] = normalizeSlug(base);
+            }
+          }
+          return next;
+        });
+
+        // reset errors when reloading
+        setSlugErrors({});
       } catch (err) {
         console.error(err);
         setErrorMsg(err.payload?.error || 'Failed to load requests.');
@@ -1149,58 +1309,130 @@ function AdminDashboard() {
     loadRequests(token);
   };
 
+  const handleSlugChange = (reqId, rawInput) => {
+    // live-normalize so what you see is what the server will get
+    const normalized = normalizeSlug(rawInput);
+    setSlugEdits((prev) => ({ ...prev, [reqId]: normalized }));
+
+    if (!normalized) {
+      setSlugErrors((prev) => ({
+        ...prev,
+        [reqId]: 'Slug is required.',
+      }));
+    } else if (!isValidSlug(normalized)) {
+      setSlugErrors((prev) => ({
+        ...prev,
+        [reqId]: 'Slug must be 3–32 chars (a–z, 0–9, hyphen).',
+      }));
+    } else {
+      setSlugErrors((prev) => {
+        const next = { ...prev };
+        delete next[reqId];
+        return next;
+      });
+    }
+  };
+
+  const getSlugForRequest = (req) => {
+    const raw = slugEdits[req.id];
+    const fromState = typeof raw === 'string' && raw.length > 0
+      ? raw
+      : null;
+
+    if (fromState) return fromState;
+
+    const base =
+      (req.suggestedSlug && req.suggestedSlug.toLowerCase()) ||
+      ((req.email || '')
+        .split('@')[0]
+        .replace(/[^a-z0-9-]/g, '-') || '');
+    return normalizeSlug(base);
+  };
+
   const handleApprove = async (reqId) => {
     const req = requests.find((r) => r.id === reqId);
     if (!req) return;
 
-    // Prefer user-suggested slug, else derive from email
-    const defaultSlug =
-      (req.suggestedSlug && req.suggestedSlug.toLowerCase()) ||
-      ((req.email || '').split('@')[0].replace(/[^a-z0-9-]/g, '-') || '');
+    const slug = getSlugForRequest(req);
+    const normalized = normalizeSlug(slug);
 
-    const slug = defaultSlug;
+    if (!normalized || !isValidSlug(normalized)) {
+      setSlugErrors((prev) => ({
+        ...prev,
+        [reqId]: 'Slug must be 3–32 chars (a–z, 0–9, hyphen).',
+      }));
+      return;
+    }
+
     const quotaMb = 200; // default quota
 
     try {
       setStatusMsg(`Approving request for ${req.email}…`);
-      await adminApproveSpaceRequest(adminToken, reqId, { slug, quotaMb });
+      setErrorMsg('');
+      await adminApproveSpaceRequest(adminToken, reqId, {
+        slug: normalized,
+        quotaMb,
+      });
       setRequests((prev) => prev.filter((r) => r.id !== reqId));
-      setStatusMsg(`Approved ${req.email} with space "${slug}" (200 MB).`);
-    } catch (err) {
-      console.error(err);
+      setStatusMsg(`Approved ${req.email} with space "${normalized}" (${quotaMb} MB).`);
+  } catch (err) {
+    console.error(err);
+
+    const code = err.payload?.error;
+    if (err.status === 409 && (code === 'space_exists' || code === 'dir_exists')) {
+      setSlugErrors((prev) => ({
+        ...prev,
+        [reqId]: err.payload?.message || 'Slug already in use. Choose another.',
+      }));
+    } else {
       setErrorMsg(err.payload?.message || 'Failed to approve request.');
     }
+  }
+
   };
 
-    const handleApproveCustom = async (reqId) => {
+  const handleApproveCustom = async (reqId) => {
     const req = requests.find((r) => r.id === reqId);
     if (!req) return;
 
-    const baseDefault =
-      (req.suggestedSlug && req.suggestedSlug.toLowerCase()) ||
-      ((req.email || '').split('@')[0].replace(/[^a-z0-9-]/g, '-') || '');
+    const slug = getSlugForRequest(req);
+    const normalized = normalizeSlug(slug);
 
-    const slugInput = window.prompt(
-      'Enter space slug (lowercase letters, digits, hyphens).',
-      baseDefault
-    );
-    if (!slugInput) return;
+    if (!normalized || !isValidSlug(normalized)) {
+      setSlugErrors((prev) => ({
+        ...prev,
+        [reqId]: 'Slug must be 3–32 chars (a–z, 0–9, hyphen).',
+      }));
+      return;
+    }
 
-    const slug = slugInput.trim();
     const quotaInput = window.prompt('Quota in MB (default 200):', '200');
     const quotaMb = quotaInput ? Number(quotaInput) : 200;
 
     try {
       setStatusMsg(`Approving request for ${req.email}…`);
-      await adminApproveSpaceRequest(adminToken, reqId, { slug, quotaMb });
+      setErrorMsg('');
+      await adminApproveSpaceRequest(adminToken, reqId, {
+        slug: normalized,
+        quotaMb,
+      });
       setRequests((prev) => prev.filter((r) => r.id !== reqId));
-      setStatusMsg(`Approved ${req.email} with space "${slug}" (${quotaMb} MB).`);
-    } catch (err) {
-      console.error(err);
+      setStatusMsg(`Approved ${req.email} with space "${normalized}" (${quotaMb} MB).`);
+  } catch (err) {
+    console.error(err);
+
+    const code = err.payload?.error;
+    if (err.status === 409 && (code === 'space_exists' || code === 'dir_exists')) {
+      setSlugErrors((prev) => ({
+        ...prev,
+        [reqId]: err.payload?.message || 'Slug already in use. Choose another.',
+      }));
+    } else {
       setErrorMsg(err.payload?.message || 'Failed to approve request.');
     }
-  };
+  }
 
+  };
 
   const handleReject = async (reqId) => {
     const req = requests.find((r) => r.id === reqId);
@@ -1213,6 +1445,7 @@ function AdminDashboard() {
 
     try {
       setStatusMsg('Rejecting request...');
+      setErrorMsg('');
       await adminRejectSpaceRequest(adminToken, reqId, reason || null);
       setRequests((prev) => prev.filter((r) => r.id !== reqId));
       setStatusMsg(`Rejected request from ${req.email}.`);
@@ -1261,6 +1494,8 @@ function AdminDashboard() {
                 setAdminToken('');
                 localStorage.removeItem('adminToken');
                 setRequests([]);
+                setSlugEdits({});
+                setSlugErrors({});
               }}
             >
               Clear token
@@ -1300,68 +1535,109 @@ function AdminDashboard() {
               background: 'rgba(15,23,42,0.9)'
             }}
           >
-            {requests.map((r) => (
-              <div
-                key={r.id}
-                style={{
-                  padding: 8,
-                  borderRadius: 6,
-                  border: '1px solid var(--panel-border)',
-                  marginBottom: 6,
-                  fontSize: 12
-                }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                  <div>
-                    <strong>{r.email}</strong>
+            {requests.map((r) => {
+              const slugValue = getSlugForRequest(r);
+              const slugError = slugErrors[r.id] || null;
+              const slugIsValid = slugValue && isValidSlug(slugValue);
+
+              return (
+                <div
+                  key={r.id}
+                  style={{
+                    padding: 8,
+                    borderRadius: 6,
+                    border: '1px solid var(--panel-border)',
+                    marginBottom: 6,
+                    fontSize: 12
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <div>
+                      <strong>{r.email}</strong>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                        userId: {r.userId}
+                      </div>
+                    </div>
                     <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                      userId: {r.userId}
+                      {r.createdAt}
                     </div>
                   </div>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                    {r.createdAt}
+
+                  {r.note && (
+                    <div style={{ fontSize: 12, marginBottom: 6 }}>
+                      Request note:{' '}
+                      <span style={{ color: 'var(--text-main)' }}>{r.note}</span>
+                    </div>
+                  )}
+
+                  <div style={{ marginBottom: 6 }}>
+                    <label style={{ fontSize: 11, display: 'block' }}>
+                      Space slug
+                      <input
+                        type="text"
+                        value={slugValue}
+                        onChange={(e) => handleSlugChange(r.id, e.target.value)}
+                        placeholder="e.g. scott-hud"
+                        style={{
+                          marginTop: 4,
+                          width: '100%',
+                          borderRadius: 999,
+                          border: '1px solid var(--panel-border)',
+                          background: '#020617',
+                          color: 'var(--text-main)',
+                          padding: '4px 10px',
+                          fontSize: 12
+                        }}
+                      />
+                    </label>
+                    <div style={{ fontSize: 10, marginTop: 2 }}>
+                      <span style={{ color: 'var(--text-muted)' }}>
+                        3–32 chars; lowercase letters, digits, hyphens only.
+                      </span>
+                      {slugError && (
+                        <div style={{ color: '#f97373', marginTop: 2 }}>
+                          {slugError}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 4 }}>
+                    <button
+                      className="button small"
+                      type="button"
+                      onClick={() => handleApprove(r.id)}
+                      title="Approve using current slug and default quota"
+                      disabled={!slugIsValid}
+                    >
+                      Approve
+                    </button>
+                    <button
+                      className="button small"
+                      type="button"
+                      onClick={() => handleApproveCustom(r.id)}
+                      title="Approve with current slug and custom quota"
+                      disabled={!slugIsValid}
+                    >
+                      Approve (custom quota)
+                    </button>
+                    <button
+                      className="button small"
+                      type="button"
+                      onClick={() => handleReject(r.id)}
+                    >
+                      Reject
+                    </button>
                   </div>
                 </div>
-                {r.note && (
-                  <div style={{ fontSize: 12, marginBottom: 4 }}>
-                    Request note: <span style={{ color: 'var(--text-main)' }}>{r.note}</span>
-                  </div>
-                )}
-<div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 4 }}>
-  <button
-    className="button small"
-    type="button"
-    onClick={() => handleApprove(r.id)}
-    title="Approve using suggested slug and default quota"
-  >
-    Approve (suggested)
-  </button>
-  <button
-    className="button small"
-    type="button"
-    onClick={() => handleApproveCustom(r.id)}
-    title="Approve with custom slug/quota"
-  >
-    Approve (custom)
-  </button>
-  <button
-    className="button small"
-    type="button"
-    onClick={() => handleReject(r.id)}
-  >
-    Reject
-  </button>
-</div>
-
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
     </div>
   );
 }
-
 
 export default function App() {
   return (

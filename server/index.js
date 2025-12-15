@@ -102,6 +102,7 @@ if (SENDGRID_API_KEY && SENDGRID_FROM) {
 } else {
   console.log('[mail] SendGrid not fully configured (missing key or from address)');
 }
+const WORKSPACE_ADMIN_EMAIL = process.env.WORKSPACE_ADMIN_EMAIL || null;
 
 const PORTALS_NOTES_PATH = path.join(ROOT_DIR, 'docs', 'portals-sdk-notes.md');
 let portalsMarkdownCache = null;
@@ -401,7 +402,7 @@ async function sendMagicLinkEmail(email, url) {
     return;
   }
 
-  const subject = 'Sign in to Portals iFrames @ Jawn.Bot';
+  const subject = 'Sign in to Portals iFrames Builder @ Jawn.Bot';
   const escapedUrl = url.replace(/"/g, '&quot;'); // minimal safety
 
   const html = `
@@ -413,7 +414,7 @@ async function sendMagicLinkEmail(email, url) {
             Portals iFrames - 
           </div>
           <div style="font-size:16px; font-weight:600; color:#e5e7eb;">
-            Sign in to access your Portals iFrames!
+            Sign in to access your Portals iFrames Builder!
           </div>
         </td>
       </tr>
@@ -421,7 +422,7 @@ async function sendMagicLinkEmail(email, url) {
         <td style="padding:18px 20px 8px; font-size:14px; color:#cbd5f5;">
           <p style="margin:0 0 10px;">Hi,</p>
           <p style="margin:0 0 14px;">
-            Click the button below to sign in to your account and access your Portals iFrames @ Jawn.Bot.
+            Click the button below to sign in to your account and access your Portals iFrames Builder @ Jawn.Bot.
           </p>
           <p style="margin:0 0 18px; font-size:12px; color:#9ca3af;">
             This link expires in about <strong>15 minutes</strong> or after it&apos;s used once.
@@ -435,7 +436,7 @@ async function sendMagicLinkEmail(email, url) {
               <td align="center" style="border-radius:999px; background:linear-gradient(to right,#22d3ee,#a855f7);">
                 <a href="${escapedUrl}" 
                    style="display:inline-block; padding:10px 24px; font-size:13px; color:#020617; text-decoration:none; font-weight:600;">
-                  Sign in to Portals iFrames @ Jawn.Bot
+                  Sign in to Portals iFrames Builder @ Jawn.Bot
                 </a>
               </td>
             </tr>
@@ -465,7 +466,7 @@ async function sendMagicLinkEmail(email, url) {
   `;
 
   const text = [
-    'Sign in to Portals iFrames @ Jawn.Bot',
+    'Sign in to Portals iFrames Builder @ Jawn.Bot',
     '',
     `Click this link to sign in: ${url}`,
     '',
@@ -486,6 +487,182 @@ async function sendMagicLinkEmail(email, url) {
   console.log('[magic-link] sent email to', email);
 }
 
+async function sendWorkspaceRequestNotificationToAdmin(request) {
+  if (!SENDGRID_API_KEY || !SENDGRID_FROM || !WORKSPACE_ADMIN_EMAIL) {
+    console.log('[workspace-email] dev mode: would notify admin of workspace request:', {
+      admin: WORKSPACE_ADMIN_EMAIL,
+      request,
+    });
+    return;
+  }
+
+  const appBase = APP_BASE_URL.replace(/\/+$/, '');
+  const adminUrl = `${appBase}/admin`;
+
+  const subject = `New workspace request from ${request.email}`;
+  const textLines = [
+    `A new workspace request has been submitted.`,
+    ``,
+    `User: ${request.email}`,
+    `User ID: ${request.userId}`,
+    `Suggested slug: ${request.suggestedSlug || '(none)'}`,
+    `Note: ${request.note || '(none)'}`,
+    `Requested at: ${request.createdAt}`,
+    ``,
+    `Review and approve this request at: ${adminUrl}`,
+  ];
+
+  const text = textLines.join('\n');
+
+  const html = `
+    <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:#020617; color:#e5e7eb; padding:24px;">
+      <table width="100%" cellspacing="0" cellpadding="0" style="max-width:520px; margin:0 auto; background:#0b1120; border-radius:14px; border:1px solid #1f2937;">
+        <tr>
+          <td style="padding:18px 20px 12px; border-bottom:1px solid #1f2937;">
+            <div style="font-size:11px; letter-spacing:0.18em; text-transform:uppercase; color:#22d3ee; margin-bottom:4px;">
+              Portals iFrames · Workspace Request
+            </div>
+            <div style="font-size:16px; font-weight:600; color:#e5e7eb;">
+              New workspace request from ${request.email}
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:18px 20px 10px; font-size:13px; color:#cbd5f5;">
+            <p style="margin:0 0 8px;">Details:</p>
+            <ul style="margin:0 0 10px; padding-left:18px;">
+              <li><strong>User:</strong> ${request.email}</li>
+              <li><strong>User ID:</strong> ${request.userId}</li>
+              <li><strong>Suggested slug:</strong> ${request.suggestedSlug || '(none)'}</li>
+              <li><strong>Note:</strong> ${request.note || '(none)'}</li>
+              <li><strong>Requested at:</strong> ${request.createdAt}</li>
+            </ul>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:0 20px 18px;">
+            <table cellspacing="0" cellpadding="0">
+              <tr>
+                <td style="border-radius:999px; background:linear-gradient(to right,#22d3ee,#a855f7);">
+                  <a href="${adminUrl}"
+                     style="display:inline-block; padding:8px 20px; font-size:13px; color:#020617; text-decoration:none; font-weight:600;">
+                    Open admin workspace requests
+                  </a>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </div>
+  `;
+
+  const msg = {
+    to: WORKSPACE_ADMIN_EMAIL,
+    from: SENDGRID_FROM,
+    subject,
+    text,
+    html,
+  };
+
+  try {
+    await sgMail.send(msg);
+    console.log('[workspace-email] sent admin workspace request notification for', request.id);
+  } catch (err) {
+    console.error('[workspace-email] failed to send admin notification', err);
+  }
+}
+
+async function sendWorkspaceApprovalEmailToUser(user, spaceRecord, requestRecord) {
+  if (!SENDGRID_API_KEY || !SENDGRID_FROM) {
+    console.log('[workspace-email] dev mode: would email user about approval:', {
+      to: user.email,
+      space: spaceRecord.slug,
+    });
+    return;
+  }
+
+  const appBase = APP_BASE_URL.replace(/\/+$/, '');
+  const appUrl = `${appBase}/`;
+  const iframeUrl = `${appBase}/p/${encodeURIComponent(spaceRecord.slug)}/index.html`;
+
+  const subject = `Your Portals iFrames workspace "${spaceRecord.slug}" is ready`;
+  const textLines = [
+    `Your workspace request has been approved.`,
+    ``,
+    `Space slug: ${spaceRecord.slug}`,
+    `Quota: ${spaceRecord.quotaMb} MB`,
+    ``,
+    `You can sign in and start editing your overlay at:`,
+    `${appUrl}`,
+    ``,
+    `Default iframe URL for your Portals space:`,
+    `${iframeUrl}`,
+  ];
+
+  const text = textLines.join('\n');
+
+  const html = `
+    <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:#020617; color:#e5e7eb; padding:24px;">
+      <table width="100%" cellspacing="0" cellpadding="0" style="max-width:520px; margin:0 auto; background:#0b1120; border-radius:14px; border:1px solid #1f2937;">
+        <tr>
+          <td style="padding:18px 20px 12px; border-bottom:1px solid #1f2937;">
+            <div style="font-size:11px; letter-spacing:0.18em; text-transform:uppercase; color:#22d3ee; margin-bottom:4px;">
+              Portals iFrames Builder · Workspace Approved
+            </div>
+            <div style="font-size:16px; font-weight:600; color:#e5e7eb;">
+              Your workspace "${spaceRecord.slug}" is ready
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:18px 20px 10px; font-size:13px; color:#cbd5f5;">
+            <p style="margin:0 0 10px;">You can now sign in and start building your HUD overlays.</p>
+            <p style="margin:0 0 6px;">
+              <strong>Space slug:</strong> ${spaceRecord.slug}<br/>
+              <strong>Quota:</strong> ${spaceRecord.quotaMb} MB
+            </p>
+            <p style="margin:10px 0 6px; font-size:12px; color:#9ca3af;">
+              Default iFrame URL for your Portals space:
+            </p>
+            <p style="margin:0 0 12px; font-size:12px; color:#22d3ee; word-break:break-all;">
+              <a href="${iframeUrl}" style="color:#22d3ee; text-decoration:none;">${iframeUrl}</a>
+            </p>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:0 20px 18px;">
+            <table cellspacing="0" cellpadding="0">
+              <tr>
+                <td style="border-radius:999px; background:linear-gradient(to right,#22d3ee,#a855f7);">
+                  <a href="${appUrl}"
+                     style="display:inline-block; padding:8px 20px; font-size:13px; color:#020617; text-decoration:none; font-weight:600;">
+                    Open Portals iFrames @ Jawn.Bot
+                  </a>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </div>
+  `;
+
+  const msg = {
+    to: user.email,
+    from: SENDGRID_FROM,
+    subject,
+    text,
+    html,
+  };
+
+  try {
+    await sgMail.send(msg);
+    console.log('[workspace-email] sent approval email to', user.email, 'for space', spaceRecord.slug);
+  } catch (err) {
+    console.error('[workspace-email] failed to send approval email', err);
+  }
+}
 
 // Attach req.user + req.session if sid cookie exists
 async function sessionMiddleware(req, res, next) {
@@ -550,7 +727,6 @@ function requireUser(req, res, next) {
 
 
 // ───────────────── Middlewares ─────────────────
-
 // Trust proxy if you’re behind Nginx later
 if (process.env.TRUST_PROXY === '1') {
   app.set('trust proxy', true);
@@ -573,10 +749,26 @@ app.use(
   })
 );
 
-// CORS – for now, wide open in dev
+// Before: app.use(cors({ origin: true, credentials: true }));
+const ALLOWED_ORIGINS = [
+  'https://iframes.jawn.bot',
+  'http://localhost:4100', // dev UI
+  'http://localhost:5173', // if you’re running Vite locally
+];
+
 app.use(
   cors({
-    origin: true,
+    origin(origin, cb) {
+      // Allow non-browser / same-origin calls (curl, health checks, etc.)
+      if (!origin) return cb(null, true);
+
+      if (ALLOWED_ORIGINS.includes(origin)) {
+        return cb(null, true);
+      }
+
+      console.warn('[cors] blocked origin:', origin);
+      return cb(new Error('Not allowed by CORS'));
+    },
     credentials: true,
   })
 );
@@ -589,7 +781,6 @@ if (NODE_ENV === 'development') {
 }
 
 // ───────────────── Health / version ─────────────────
-
 app.get('/health', async (req, res) => {
   await ensureSpacesRoot();
   res.json({
@@ -609,7 +800,6 @@ app.get('/api/version', (req, res) => {
 });
 
 // ───────────────── Magic-link auth ─────────────────
-
 // Start magic link: POST /api/auth/magic/start { email }
 app.post('/api/auth/magic/start', async (req, res, next) => {
   try {
@@ -1527,6 +1717,11 @@ app.post('/api/spaces/request', requireUser, async (req, res, next) => {
       email: reqRecord.email,
       suggestedSlug
     });
+     try {
+      await sendWorkspaceRequestNotificationToAdmin(reqRecord);
+    } catch (mailErr) {
+      // already logged inside helper; no-op here
+    }
 
     res.status(201).json({
       ok: true,
@@ -1815,7 +2010,11 @@ app.post('/api/admin/space-requests/:id/approve', requireAdmin, async (req, res,
       email: user.email,
       slug
     });
-
+    try {
+      await sendWorkspaceApprovalEmailToUser(user, spaceRecord, updatedReq);
+    } catch (mailErr) {
+      // helper logs internally; don't block the approval
+    }
     res.json({
       ok: true,
       request: updatedReq,

@@ -1,3 +1,5 @@
+//client/src/api.js
+
 const API_BASE = '';
 
 async function request(path, options = {}) {
