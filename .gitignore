@@ -16,4 +16,15 @@ logs/
 dist/
 build/
 .env
+
+# Runtime meta / state
+magicTokens.meta.json
+sessions.meta.json
+users.meta.json
+spaces.meta.json
 approvedUsers.meta.json
+cookies.txt
+
+# Runtime user content
+spaces/
+
