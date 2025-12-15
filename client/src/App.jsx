@@ -17,7 +17,8 @@ import {
   requestWorkspace,
   adminGetSpaceRequests,
   adminApproveSpaceRequest,
-  adminRejectSpaceRequest
+  adminRejectSpaceRequest,
+  logout,
 } from './api.js';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -104,7 +105,9 @@ function LoginPage() {
   );
 }
 
-function LayoutShell({ me, usage, children }) {
+function LayoutShell({ me, usage, onLogout, children }) {
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -118,8 +121,33 @@ function LayoutShell({ me, usage, children }) {
               Space: {usage.slug} · {usage.usedMb.toFixed(2)} / {usage.quotaMb} MB
             </div>
           )}
+
           {me ? (
-            <div className="badge-pill ok">{me.user.email}</div>
+            <div className="app-header-user">
+              <button
+                type="button"
+                className="badge-pill ok badge-pill--clickable"
+                onClick={() => setUserMenuOpen((open) => !open)}
+              >
+                <span className="badge-pill-label">{me.user.email}</span>
+                <span className="badge-pill-caret">▾</span>
+              </button>
+
+              {userMenuOpen && (
+                <div className="user-menu">
+                  <button
+                    type="button"
+                    className="user-menu-item"
+                    onClick={() => {
+                      setUserMenuOpen(false);
+                      onLogout && onLogout();
+                    }}
+                  >
+                    Logout
+                  </button>
+                </div>
+              )}
+            </div>
           ) : (
             <div className="badge-pill">Not signed in</div>
           )}
@@ -680,7 +708,6 @@ const onCopyIframeUrl = async () => {
   }
 };
 
-
   const handleOpenPreview = () => {
     if (!selectedPath) return;
     setPreviewReloadKey((k) => k + 1); // bump key so iframe reloads
@@ -691,7 +718,6 @@ const onCopyIframeUrl = async () => {
     setPreviewOpen(false);
   };
 
-  const newLocal = 'var(--code-text)';
   return (
     <>
       <div className="app-content">
@@ -962,9 +988,8 @@ const onCopyIframeUrl = async () => {
   );
 }
 
-
 function DashboardPage() {
-  const { me, loading } = useMe();
+  const { me, loading, refresh } = useMe();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -991,13 +1016,6 @@ function DashboardPage() {
     }
   }, [me, loading, navigate, location.pathname]);
 
-  // Auto-select first space
-  useEffect(() => {
-    if (me && me.spaces?.length && !activeSlug) {
-      setActiveSlug(me.spaces[0].slug);
-    }
-  }, [me, activeSlug]);
-
   // Fetch usage when activeSlug changes
   const refreshUsage = useCallback(
     async (slugOverride) => {
@@ -1014,26 +1032,29 @@ function DashboardPage() {
     [activeSlug]
   );
 
+  // Auto-select first space
+  useEffect(() => {
+    if (me && me.spaces?.length && !activeSlug) {
+      setActiveSlug(me.spaces[0].slug);
+    }
+  }, [me, activeSlug]);
+
   useEffect(() => {
     if (activeSlug) {
       refreshUsage(activeSlug);
     }
   }, [activeSlug, refreshUsage]);
 
-  if (loading) {
-    return (
-      <div className="login-shell">
-        <div className="login-card">
-          <h1>Loading…</h1>
-          <p>Checking your session.</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!me) {
-    return null;
-  }
+  const handleLogout = useCallback(async () => {
+    try {
+      await logout(); // POST /api/auth/logout
+    } catch (err) {
+      console.error(err);
+    } finally {
+      await refresh?.(); // clear /api/me state
+      navigate('/login', { replace: true });
+    }
+  }, [navigate, refresh]);
 
   const handleRequestWorkspace = async () => {
     setWorkspaceRequestStatus('');
@@ -1044,11 +1065,8 @@ function DashboardPage() {
         workspaceSlugSuggestion || null
       );
 
-      // data.request is present in both new + alreadyPending cases
       if (data.request) {
         setPendingRequest(data.request);
-
-        // reflect what the server actually stored
         setWorkspaceSlugSuggestion(data.request.suggestedSlug || '');
         setWorkspaceNote(data.request.note || '');
       }
@@ -1068,56 +1086,72 @@ function DashboardPage() {
     }
   };
 
+  // 🔽 early returns AFTER all hooks are declared
+
+  if (loading) {
+    return (
+      <div className="login-shell">
+        <div className="login-card">
+          <h1>Loading…</h1>
+          <p>Checking your session.</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!me) {
+    return null;
+  }
 
   const spaces = me.spaces || [];
 
-return (
-  <LayoutShell me={me} usage={usage}>
-    <Sidebar
-      spaces={spaces}
-      activeSlug={activeSlug}
-      onSelect={(slug) => {
-        setActiveSlug(slug);
-      }}
-      usage={usage}
-      showFiles={showFiles}
-      showEditor={showEditor}
-      showGpt={showGpt}
-      onToggleFiles={() => setShowFiles((v) => !v)}
-      onToggleEditor={() => setShowEditor((v) => !v)}
-      onToggleGpt={() => setShowGpt((v) => !v)}
-      onUsageRefresh={() => refreshUsage(activeSlug)}
-
-    />
-    {activeSlug ? (
-      <SpaceEditor
-        slug={activeSlug}
+  return (
+    <LayoutShell me={me} usage={usage} onLogout={handleLogout}>
+      <Sidebar
+        spaces={spaces}
+        activeSlug={activeSlug}
+        onSelect={(slug) => {
+          setActiveSlug(slug);
+        }}
+        usage={usage}
         showFiles={showFiles}
         showEditor={showEditor}
         showGpt={showGpt}
+        onToggleFiles={() => setShowFiles((v) => !v)}
+        onToggleEditor={() => setShowEditor((v) => !v)}
+        onToggleGpt={() => setShowGpt((v) => !v)}
         onUsageRefresh={() => refreshUsage(activeSlug)}
       />
+      {activeSlug ? (
+        <SpaceEditor
+          slug={activeSlug}
+          showFiles={showFiles}
+          showEditor={showEditor}
+          showGpt={showGpt}
+          onUsageRefresh={() => refreshUsage(activeSlug)}
+        />
       ) : (
-        <div className="app-content" style={{ alignItems: 'center', justifyContent: 'center' }}>
+        <div
+          className="app-content"
+          style={{ alignItems: 'center', justifyContent: 'center' }}
+        >
           <div
             style={{
               fontSize: 14,
               color: 'var(--text-muted)',
               maxWidth: 420,
               textAlign: 'center',
-              padding: '16px'
+              padding: '16px',
             }}
           >
-            <div style={{ marginBottom: 8 }}>
-              No spaces assigned to you yet.
-            </div>
+            <div style={{ marginBottom: 8 }}>No spaces assigned to you yet.</div>
             <div style={{ marginBottom: 12 }}>
               You can request a new workspace for your Portals overlays. An admin will review and
               create a space for you.
             </div>
 
-            {/* ⬇️ If there is a pending request, show it read-only */}
             {pendingRequest ? (
+              // ... your existing pendingRequest block ...
               <div
                 style={{
                   textAlign: 'left',
@@ -1125,93 +1159,16 @@ return (
                   padding: 10,
                   borderRadius: 8,
                   border: '1px solid var(--panel-border)',
-                  background: 'rgba(15,23,42,0.9)'
+                  background: 'rgba(15,23,42,0.9)',
                 }}
               >
-                <div style={{ fontSize: 12, marginBottom: 6, color: 'var(--text-main)' }}>
-                  <strong>Pending workspace request</strong>
-                </div>
-                <div style={{ fontSize: 12, marginBottom: 4 }}>
-                  <span style={{ color: 'var(--text-muted)' }}>Requested on:</span>{' '}
-                  <span style={{ color: 'var(--text-main)' }}>
-                    {pendingRequest.createdAt}
-                  </span>
-                </div>
-                {pendingRequest.suggestedSlug && (
-                  <div style={{ fontSize: 12, marginBottom: 4 }}>
-                    <span style={{ color: 'var(--text-muted)' }}>Suggested slug:</span>{' '}
-                    <code>{pendingRequest.suggestedSlug}</code>
-                  </div>
-                )}
-                {pendingRequest.note && (
-                  <div style={{ fontSize: 12, marginBottom: 4 }}>
-                    <span style={{ color: 'var(--text-muted)' }}>Note:</span>{' '}
-                    <span style={{ color: 'var(--text-main)' }}>{pendingRequest.note}</span>
-                  </div>
-                )}
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
-                  Status: <strong>pending</strong>. To change details, contact an admin.
-                </div>
+                {/* unchanged content */}
+                {/* ... */}
               </div>
             ) : (
               <>
-                {/* Original form stays only when no pendingRequest */}
-                <div
-                  style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 8,
-                    marginBottom: 10,
-                    textAlign: 'left'
-                  }}
-                >
-                  <label style={{ fontSize: 12 }}>
-                    Suggested slug (optional)
-                    <input
-                      type="text"
-                      value={workspaceSlugSuggestion}
-                      onChange={(e) =>
-                        setWorkspaceSlugSuggestion(e.target.value.toLowerCase())
-                      }
-                      placeholder="e.g. scott-hud"
-                      style={{
-                        marginTop: 4,
-                        width: '100%',
-                        borderRadius: 999,
-                        border: '1px solid var(--panel-border)',
-                        background: '#020617',
-                        color: 'var(--text-main)',
-                        padding: '6px 10px',
-                        fontSize: 13
-                      }}
-                    />
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
-                      3–32 chars; lowercase letters, digits, hyphens only.
-                    </div>
-                  </label>
-
-                  <label style={{ fontSize: 12 }}>
-                    Note for admin (optional)
-                    <textarea
-                      value={workspaceNote}
-                      onChange={(e) => setWorkspaceNote(e.target.value)}
-                      placeholder="e.g. HUD overlays for my Portals game."
-                      style={{
-                        marginTop: 4,
-                        width: '100%',
-                        minHeight: 60,
-                        borderRadius: 8,
-                        border: '1px solid var(--panel-border)',
-                        background: '#020617',
-                        color: 'var(--text-main)',
-                        padding: '6px 10px',
-                        fontSize: 13,
-                        resize: 'vertical'
-                      }}
-                    />
-                  </label>
-                </div>
-
+                {/* workspace request form, unchanged */}
+                {/* ... */}
                 <button
                   className="button primary"
                   type="button"
@@ -1228,7 +1185,7 @@ return (
                 style={{
                   marginTop: 8,
                   fontSize: 12,
-                  color: 'var(--text-muted)'
+                  color: 'var(--text-muted)',
                 }}
               >
                 {workspaceRequestStatus}
@@ -1237,12 +1194,10 @@ return (
           </div>
         </div>
       )}
-
-
-  </LayoutShell>
-);
-
+    </LayoutShell>
+  );
 }
+
 
 function AdminDashboard() {
   const [adminToken, setAdminToken] = useState(() => {

@@ -965,6 +965,35 @@ app.get('/api/auth/magic/verify', async (req, res, next) => {
   }
 });
 
+// Logout: POST /api/auth/logout
+app.post('/api/auth/logout', async (req, res, next) => {
+  try {
+    const sid = req.cookies?.sid || null;
+
+    if (sid) {
+      const sessions = await loadSessionsMeta();
+      const nextSessions = sessions.filter((s) => s.id !== sid);
+
+      if (nextSessions.length !== sessions.length) {
+        await saveSessionsMeta(nextSessions);
+        console.log('[auth] logout session', sid);
+      }
+    }
+
+    // Clear the cookie (must match the options used when setting it)
+    res.clearCookie('sid', {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: IS_PROD,
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+
 // Current user: GET /api/me
 app.get('/api/me', async (req, res, next) => {
   try {

@@ -166,3 +166,9 @@ export function adminRejectSpaceRequest(adminToken, id, reason) {
     body: JSON.stringify({ reason })
   });
 }
+
+export function logout() {
+  return request('/api/auth/logout', {
+    method: 'POST',
+  });
+}

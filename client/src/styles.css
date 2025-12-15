@@ -654,6 +654,61 @@ body {
   background: transparent;
 }
 
+.app-header-user {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.badge-pill--clickable {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent; /* badge-pill already provides bg */
+  padding: 0;              /* badge-pill class handles padding */
+}
+
+.badge-pill--clickable:focus-visible {
+  outline: 2px solid var(--accent-primary, #3b82f6);
+  outline-offset: 2px;
+}
+
+.badge-pill-caret {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.user-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  min-width: 120px;
+  padding: 4px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.98);
+  border: 1px solid var(--panel-border, #1f2937);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.8);
+  z-index: 40;
+}
+
+.user-menu-item {
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text-main, #e5e7eb);
+  text-align: left;
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.user-menu-item:hover {
+  background: rgba(37, 99, 235, 0.1);
+}
+
 /* Responsive: stack vertically on narrower viewports */
 @media (max-width: 1024px) {
   .editor-shell {
