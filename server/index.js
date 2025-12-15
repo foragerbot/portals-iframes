@@ -1122,7 +1122,7 @@ app.get('/api/spaces/:slug/files', requireUser, async (req, res, next) => {
 
 // Get a single file's contents
 // GET /api/spaces/:slug/file?path=relative/path.ext
-app.get('/api/spaces/:slug/file', requireUser, requireEditorOrigin, async (req, res, next) => {
+app.get('/api/spaces/:slug/file', requireUser, async (req, res, next) => {
   try {
     await ensureSpacesRoot();
     const { slug } = req.params;
@@ -1347,6 +1347,7 @@ app.post('/api/spaces/:slug/file/rename', requireUser, requireEditorOrigin, asyn
 app.post(
   '/api/spaces/:slug/gpt/chat',
   requireUser,
+  requireEditorOrigin,
   gptRateLimiter,
   async (req, res, next) => {
     try {

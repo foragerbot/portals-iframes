@@ -1216,6 +1216,7 @@ function AdminDashboard() {
   const [slugEdits, setSlugEdits] = useState({});   // { [requestId]: currentSlug }
   const [slugErrors, setSlugErrors] = useState({}); // { [requestId]: errorMessage | null }
 
+  // allowlist
   const [approvedUsers, setApprovedUsers] = useState([]);
   const [allowlistLoading, setAllowlistLoading] = useState(false);
   const [allowlistError, setAllowlistError] = useState('');
@@ -1245,20 +1246,39 @@ function AdminDashboard() {
                 .split('@')[0]
                 .replace(/[^a-z0-9-]/g, '-') || '');
             if (!next[r.id]) {
-              // normalize to show exactly what will go to the server
               next[r.id] = normalizeSlug(base);
             }
           }
           return next;
         });
 
-        // reset errors when reloading
         setSlugErrors({});
       } catch (err) {
         console.error(err);
         setErrorMsg(err.payload?.error || 'Failed to load requests.');
       } finally {
         setLoading(false);
+      }
+    },
+    []
+  );
+
+  const loadApproved = useCallback(
+    async (token) => {
+      if (!token) {
+        setApprovedUsers([]);
+        return;
+      }
+      setAllowlistLoading(true);
+      setAllowlistError('');
+      try {
+        const data = await adminGetApprovedUsers(token);
+        setApprovedUsers(data.users || []);
+      } catch (err) {
+        console.error(err);
+        setAllowlistError(err.payload?.message || 'Failed to load allowlist.');
+      } finally {
+        setAllowlistLoading(false);
       }
     },
     []
@@ -1273,6 +1293,7 @@ function AdminDashboard() {
       setApprovedUsers([]);
     }
   }, [adminToken, loadRequests, loadApproved]);
+
   const handleAddAllowEmail = async () => {
     const email = newAllowEmail.trim();
     if (!email) return;
@@ -1306,32 +1327,12 @@ function AdminDashboard() {
     if (!token) return;
     setAdminToken(token);
     localStorage.setItem('adminToken', token);
+    // this will trigger useEffect and load both requests + allowlist,
+    // but we can eagerly load requests too:
     loadRequests(token);
   };
 
-  const loadApproved = useCallback(
-    async (token) => {
-      if (!token) {
-        setApprovedUsers([]);
-        return;
-      }
-      setAllowlistLoading(true);
-      setAllowlistError('');
-      try {
-        const data = await adminGetApprovedUsers(token);
-        setApprovedUsers(data.users || []);
-      } catch (err) {
-        console.error(err);
-        setAllowlistError(err.payload?.message || 'Failed to load allowlist.');
-      } finally {
-        setAllowlistLoading(false);
-      }
-    },
-    []
-  );
-
   const handleSlugChange = (reqId, rawInput) => {
-    // live-normalize so what you see is what the server will get
     const normalized = normalizeSlug(rawInput);
     setSlugEdits((prev) => ({ ...prev, [reqId]: normalized }));
 
@@ -1356,10 +1357,7 @@ function AdminDashboard() {
 
   const getSlugForRequest = (req) => {
     const raw = slugEdits[req.id];
-    const fromState = typeof raw === 'string' && raw.length > 0
-      ? raw
-      : null;
-
+    const fromState = typeof raw === 'string' && raw.length > 0 ? raw : null;
     if (fromState) return fromState;
 
     const base =
@@ -1385,7 +1383,7 @@ function AdminDashboard() {
       return;
     }
 
-    const quotaMb = 100; // default quota
+    const quotaMb = 100;
 
     try {
       setStatusMsg(`Approving request for ${req.email}…`);
@@ -1396,20 +1394,18 @@ function AdminDashboard() {
       });
       setRequests((prev) => prev.filter((r) => r.id !== reqId));
       setStatusMsg(`Approved ${req.email} with space "${normalized}" (${quotaMb} MB).`);
-  } catch (err) {
-    console.error(err);
-
-    const code = err.payload?.error;
-    if (err.status === 409 && (code === 'space_exists' || code === 'dir_exists')) {
-      setSlugErrors((prev) => ({
-        ...prev,
-        [reqId]: err.payload?.message || 'Slug already in use. Choose another.',
-      }));
-    } else {
-      setErrorMsg(err.payload?.message || 'Failed to approve request.');
+    } catch (err) {
+      console.error(err);
+      const code = err.payload?.error;
+      if (err.status === 409 && (code === 'space_exists' || code === 'dir_exists')) {
+        setSlugErrors((prev) => ({
+          ...prev,
+          [reqId]: err.payload?.message || 'Slug already in use. Choose another.',
+        }));
+      } else {
+        setErrorMsg(err.payload?.message || 'Failed to approve request.');
+      }
     }
-  }
-
   };
 
   const handleApproveCustom = async (reqId) => {
@@ -1439,20 +1435,18 @@ function AdminDashboard() {
       });
       setRequests((prev) => prev.filter((r) => r.id !== reqId));
       setStatusMsg(`Approved ${req.email} with space "${normalized}" (${quotaMb} MB).`);
-  } catch (err) {
-    console.error(err);
-
-    const code = err.payload?.error;
-    if (err.status === 409 && (code === 'space_exists' || code === 'dir_exists')) {
-      setSlugErrors((prev) => ({
-        ...prev,
-        [reqId]: err.payload?.message || 'Slug already in use. Choose another.',
-      }));
-    } else {
-      setErrorMsg(err.payload?.message || 'Failed to approve request.');
+    } catch (err) {
+      console.error(err);
+      const code = err.payload?.error;
+      if (err.status === 409 && (code === 'space_exists' || code === 'dir_exists')) {
+        setSlugErrors((prev) => ({
+          ...prev,
+          [reqId]: err.payload?.message || 'Slug already in use. Choose another.',
+        }));
+      } else {
+        setErrorMsg(err.payload?.message || 'Failed to approve request.');
+      }
     }
-  }
-
   };
 
   const handleReject = async (reqId) => {
@@ -1475,7 +1469,6 @@ function AdminDashboard() {
       setErrorMsg(err.payload?.message || 'Failed to reject request.');
     }
   };
-
   return (
     <div className="login-shell">
       <div className="login-card" style={{ maxWidth: 640 }}>
