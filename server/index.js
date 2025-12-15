@@ -1677,6 +1677,209 @@ app.get('/api/admin/space-requests', requireAdmin, async (req, res, next) => {
   }
 });
 
+// Admin: approve a workspace request and create a space for the user
+// POST /api/admin/space-requests/:id/approve
+// body: { slug, quotaMb? }
+app.post('/api/admin/space-requests/:id/approve', requireAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { slug, quotaMb } = req.body || {};
+
+    if (!slug || !isValidSlug(slug)) {
+      return res.status(400).json({
+        error: 'bad_slug',
+        message: 'Slug must be 3-32 chars of lowercase letters, digits, or hyphens.'
+      });
+    }
+
+    const requests = await loadWorkspaceRequests();
+    const idx = requests.findIndex((r) => r.id === id);
+    if (idx === -1) {
+      return res.status(404).json({ error: 'request_not_found' });
+    }
+
+    const reqRecord = requests[idx];
+    if (reqRecord.status !== 'pending') {
+      return res.status(400).json({
+        error: 'bad_status',
+        message: `Request is already ${reqRecord.status}`
+      });
+    }
+
+    const users = await loadUsersMeta();
+    const user = users.find((u) => u.id === reqRecord.userId || u.email === reqRecord.email);
+    if (!user) {
+      return res.status(404).json({
+        error: 'user_not_found',
+        message: 'User referenced in request could not be found'
+      });
+    }
+
+    // Make sure we don't already have a space with this slug
+    const spaces = await loadSpacesMeta();
+    if (spaces.find((s) => s.slug === slug)) {
+      return res.status(409).json({
+        error: 'space_exists',
+        message: 'A space with this slug already exists.'
+      });
+    }
+
+    const now = new Date().toISOString();
+    const dirPath = path.join(SPACES_ROOT, slug);
+
+    if (fsSync.existsSync(dirPath)) {
+      return res.status(409).json({
+        error: 'dir_exists',
+        message: 'Directory for this slug already exists on disk.'
+      });
+    }
+
+    await fs.mkdir(dirPath, { recursive: true });
+
+    const starterHtml = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>${slug} overlay</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      width: 100%;
+      background: transparent;
+      color: #e5e7eb;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(15, 23, 42, 0.6);
+      box-sizing: border-box;
+    }
+    .hud {
+      padding: 12px 16px;
+      border-radius: 8px;
+      border: 1px solid rgba(148, 163, 184, 0.7);
+      background: rgba(15, 23, 42, 0.9);
+      box-shadow: 0 0 24px rgba(59, 130, 246, 0.35);
+    }
+    .hud-title {
+      font-size: 14px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #93c5fd;
+      margin: 0 0 4px;
+    }
+    .hud-body {
+      font-size: 13px;
+      color: #e5e7eb;
+      margin: 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="hud">
+    <p class="hud-title">Space: ${slug}</p>
+    <p class="hud-body">Overlay is alive. Wire this up as an iframe in your Portals scene.</p>
+  </div>
+</body>
+</html>
+`;
+
+    await fs.writeFile(path.join(dirPath, 'index.html'), starterHtml, 'utf8');
+
+    const spaceRecord = {
+      id: slug,
+      slug,
+      dirPath,
+      quotaMb: Number.isFinite(Number(quotaMb)) ? Number(quotaMb) : 200,
+      createdAt: now,
+      updatedAt: now,
+      status: 'active',
+      ownerEmail: (user.email || '').trim().toLowerCase()
+    };
+
+    spaces.push(spaceRecord);
+    await saveSpacesMeta(spaces);
+
+    // update request status
+    const updatedReq = {
+      ...reqRecord,
+      status: 'approved',
+      updatedAt: now,
+      approvedAt: now,
+      spaceSlug: slug
+    };
+    requests[idx] = updatedReq;
+    await saveWorkspaceRequests(requests);
+
+    console.log('[workspace-requests] approved', {
+      requestId: id,
+      userId: user.id,
+      email: user.email,
+      slug
+    });
+
+    res.json({
+      ok: true,
+      request: updatedReq,
+      space: spaceRecord
+    });
+  } catch (err) {
+    console.error('[workspace-requests] error approving request', err);
+    next(err);
+  }
+});
+
+// Admin: reject a workspace request
+// POST /api/admin/space-requests/:id/reject
+// body: { reason? }
+app.post('/api/admin/space-requests/:id/reject', requireAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body || {};
+
+    const requests = await loadWorkspaceRequests();
+    const idx = requests.findIndex((r) => r.id === id);
+    if (idx === -1) {
+      return res.status(404).json({ error: 'request_not_found' });
+    }
+
+    const reqRecord = requests[idx];
+    if (reqRecord.status !== 'pending') {
+      return res.status(400).json({
+        error: 'bad_status',
+        message: `Request is already ${reqRecord.status}`
+      });
+    }
+
+    const now = new Date().toISOString();
+    const updatedReq = {
+      ...reqRecord,
+      status: 'rejected',
+      updatedAt: now,
+      rejectedAt: now,
+      rejectReason: reason || null
+    };
+
+    requests[idx] = updatedReq;
+    await saveWorkspaceRequests(requests);
+
+    console.log('[workspace-requests] rejected', {
+      requestId: id,
+      email: reqRecord.email
+    });
+
+    res.json({ ok: true, request: updatedReq });
+  } catch (err) {
+    console.error('[workspace-requests] error rejecting request', err);
+    next(err);
+  }
+});
+
 // ───────────────── Public space serving (static) ─────────────────
 
 // Serve static files for a space at /p/:slug/... (e.g. /p/demo-hud/index.html)

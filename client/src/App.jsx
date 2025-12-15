@@ -12,7 +12,10 @@ import {
   renameSpaceFile,
   uploadSpaceAssets,
   deleteSpaceAsset,
-  requestWorkspace
+  requestWorkspace,
+  adminGetSpaceRequests,
+  adminApproveSpaceRequest,
+  adminRejectSpaceRequest
 } from './api.js';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -1033,10 +1036,236 @@ return (
 
 }
 
+function AdminDashboard() {
+  const [adminToken, setAdminToken] = useState(() => {
+    if (typeof window === 'undefined') return '';
+    return localStorage.getItem('adminToken') || '';
+  });
+  const [requests, setRequests] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [statusMsg, setStatusMsg] = useState('');
+  const [errorMsg, setErrorMsg] = useState('');
+
+  const loadRequests = useCallback(
+    async (token) => {
+      if (!token) {
+        setRequests([]);
+        return;
+      }
+      setLoading(true);
+      setErrorMsg('');
+      try {
+        const data = await adminGetSpaceRequests(token, 'pending');
+        setRequests(data.requests || []);
+        setStatusMsg(`Loaded ${data.requests?.length || 0} pending request(s).`);
+      } catch (err) {
+        console.error(err);
+        setErrorMsg(err.payload?.error || 'Failed to load requests.');
+      } finally {
+        setLoading(false);
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (adminToken) {
+      loadRequests(adminToken);
+    }
+  }, [adminToken, loadRequests]);
+
+  const handleSaveToken = (e) => {
+    e.preventDefault();
+    const formData = new FormData(e.target);
+    const token = (formData.get('adminToken') || '').toString().trim();
+    if (!token) return;
+    setAdminToken(token);
+    localStorage.setItem('adminToken', token);
+    loadRequests(token);
+  };
+
+  const handleApprove = async (reqId) => {
+    const req = requests.find((r) => r.id === reqId);
+    if (!req) return;
+
+    const slugInput = window.prompt(
+      'Enter space slug (lowercase letters, digits, hyphens).',
+      (req.email || '').split('@')[0].replace(/[^a-z0-9-]/g, '-') || ''
+    );
+    if (!slugInput) return;
+
+    const slug = slugInput.trim();
+    const quotaInput = window.prompt('Quota in MB (default 200):', '200');
+    const quotaMb = quotaInput ? Number(quotaInput) : 200;
+
+    try {
+      setStatusMsg('Approving request...');
+      await adminApproveSpaceRequest(adminToken, reqId, { slug, quotaMb });
+      // Remove from local list
+      setRequests((prev) => prev.filter((r) => r.id !== reqId));
+      setStatusMsg(`Approved request for ${req.email} with space "${slug}".`);
+    } catch (err) {
+      console.error(err);
+      setErrorMsg(err.payload?.message || 'Failed to approve request.');
+    }
+  };
+
+  const handleReject = async (reqId) => {
+    const req = requests.find((r) => r.id === reqId);
+    if (!req) return;
+
+    const reason = window.prompt(
+      'Optional reason for rejection (shown only in logs for now):',
+      ''
+    );
+
+    try {
+      setStatusMsg('Rejecting request...');
+      await adminRejectSpaceRequest(adminToken, reqId, reason || null);
+      setRequests((prev) => prev.filter((r) => r.id !== reqId));
+      setStatusMsg(`Rejected request from ${req.email}.`);
+    } catch (err) {
+      console.error(err);
+      setErrorMsg(err.payload?.message || 'Failed to reject request.');
+    }
+  };
+
+  return (
+    <div className="login-shell">
+      <div className="login-card" style={{ maxWidth: 640 }}>
+        <h1>Admin · Workspace Requests</h1>
+        <p style={{ marginBottom: 8 }}>
+          Manage workspace requests for approved users. This view uses the same <code>ADMIN_TOKEN</code>{' '}
+          that the API expects in the <code>x-admin-token</code> header.
+        </p>
+
+        <form onSubmit={handleSaveToken} style={{ marginBottom: 10 }}>
+          <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            Admin token
+            <input
+              name="adminToken"
+              type="password"
+              defaultValue={adminToken}
+              style={{
+                marginTop: 4,
+                width: '100%',
+                borderRadius: 999,
+                border: '1px solid var(--panel-border)',
+                background: '#020617',
+                color: 'var(--text-main)',
+                padding: '6px 10px',
+                fontSize: 13
+              }}
+            />
+          </label>
+          <div style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+            <button className="button primary" type="submit">
+              Save & load requests
+            </button>
+            <button
+              className="button small"
+              type="button"
+              onClick={() => {
+                setAdminToken('');
+                localStorage.removeItem('adminToken');
+                setRequests([]);
+              }}
+            >
+              Clear token
+            </button>
+          </div>
+        </form>
+
+        {loading && (
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
+            Loading pending requests…
+          </div>
+        )}
+        {statusMsg && (
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 }}>
+            {statusMsg}
+          </div>
+        )}
+        {errorMsg && (
+          <div style={{ fontSize: 12, color: '#f97373', marginBottom: 8 }}>
+            {errorMsg}
+          </div>
+        )}
+
+        {requests.length === 0 && !loading ? (
+          <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+            No pending requests.
+          </div>
+        ) : (
+          <div
+            style={{
+              marginTop: 6,
+              maxHeight: 360,
+              overflowY: 'auto',
+              borderRadius: 8,
+              border: '1px solid var(--panel-border)',
+              padding: 8,
+              background: 'rgba(15,23,42,0.9)'
+            }}
+          >
+            {requests.map((r) => (
+              <div
+                key={r.id}
+                style={{
+                  padding: 8,
+                  borderRadius: 6,
+                  border: '1px solid var(--panel-border)',
+                  marginBottom: 6,
+                  fontSize: 12
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <div>
+                    <strong>{r.email}</strong>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                      userId: {r.userId}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                    {r.createdAt}
+                  </div>
+                </div>
+                {r.note && (
+                  <div style={{ fontSize: 12, marginBottom: 4 }}>
+                    Request note: <span style={{ color: 'var(--text-main)' }}>{r.note}</span>
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                  <button
+                    className="button small"
+                    type="button"
+                    onClick={() => handleApprove(r.id)}
+                  >
+                    Approve & create space
+                  </button>
+                  <button
+                    className="button small"
+                    type="button"
+                    onClick={() => handleReject(r.id)}
+                  >
+                    Reject
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/admin" element={<AdminDashboard />} />
       <Route path="/*" element={<DashboardPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

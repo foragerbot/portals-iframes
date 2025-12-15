@@ -130,3 +130,34 @@ export function requestWorkspace(note) {
     body: JSON.stringify({ note })
   });
 }
+
+export function adminGetSpaceRequests(adminToken, status = 'pending') {
+  const params = new URLSearchParams();
+  if (status) params.set('status', status);
+  return request(`/api/admin/space-requests?${params.toString()}`, {
+    method: 'GET',
+    headers: {
+      'x-admin-token': adminToken
+    }
+  });
+}
+
+export function adminApproveSpaceRequest(adminToken, id, { slug, quotaMb }) {
+  return request(`/api/admin/space-requests/${encodeURIComponent(id)}/approve`, {
+    method: 'POST',
+    headers: {
+      'x-admin-token': adminToken
+    },
+    body: JSON.stringify({ slug, quotaMb })
+  });
+}
+
+export function adminRejectSpaceRequest(adminToken, id, reason) {
+  return request(`/api/admin/space-requests/${encodeURIComponent(id)}/reject`, {
+    method: 'POST',
+    headers: {
+      'x-admin-token': adminToken
+    },
+    body: JSON.stringify({ reason })
+  });
+}
