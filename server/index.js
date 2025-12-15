@@ -393,6 +393,22 @@ async function getUserGptUsage(userId) {
   return usage;
 }
 
+function portalsEmbedHeaders(req, res, next) {
+  // Helmet sets this; remove it for iframe content
+  res.removeHeader('X-Frame-Options');
+
+  // Configure via env so you can tune without code deploy
+  const ancestors = (process.env.PORTALS_FRAME_ANCESTORS || '').trim();
+
+  // If you don't know the Portals hostnames yet, start permissive, tighten later
+  const frameAncestors = ancestors || '*';
+
+  // Important: CSP is per-response. This is the modern replacement for XFO.
+  res.setHeader('Content-Security-Policy', `frame-ancestors ${frameAncestors};`);
+
+  next();
+}
+
 async function sendMagicLinkEmail(email, url) {
   // If SendGrid isn't configured, fall back to dev-mode logging
   if (!SENDGRID_API_KEY || !SENDGRID_FROM) {
@@ -974,14 +990,17 @@ app.get('/api/me', async (req, res, next) => {
 });
 
 // ───────────────── Authenticated space file APIs ─────────────────
-
 // List files in a space directory
 // GET /api/spaces/:slug/files?path=subdir/
 app.get('/api/spaces/:slug/files', requireUser, async (req, res, next) => {
   try {
     await ensureSpacesRoot();
-    const { slug } = req.params;
-    const relPath = req.query.path || '.';
+
+    const slug = String(req.params.slug || '');
+    const relPath =
+      typeof req.query.path === 'string' && req.query.path.trim()
+        ? req.query.path.trim()
+        : '.';
 
     if (!isValidSlug(slug)) {
       return res.status(400).json({ error: 'bad_slug' });
@@ -994,30 +1013,55 @@ app.get('/api/spaces/:slug/files', requireUser, async (req, res, next) => {
 
     const dirPath = resolveSpacePath(space, relPath);
 
-    const dirents = await fs.readdir(dirPath, { withFileTypes: true });
+    let dirents;
+    try {
+      dirents = await fs.readdir(dirPath, { withFileTypes: true });
+    } catch (err) {
+      // Directory doesn't exist yet? Treat as empty (nice UX for assets/)
+      if (err.code === 'ENOENT') {
+        return res.json({ ok: true, path: relPath, items: [] });
+      }
+      // Path exists but isn't a directory
+      if (err.code === 'ENOTDIR') {
+        return res.status(400).json({ error: 'not_a_directory' });
+      }
+      throw err;
+    }
 
-    const items = await Promise.all(
+    const itemsRaw = await Promise.all(
       dirents.map(async (d) => {
         const full = path.join(dirPath, d.name);
-        const stat = await fs.stat(full);
-        return {
-          name: d.name,
-          isDir: d.isDirectory(),
-          size: stat.size,
-          mtime: stat.mtime,
-        };
+
+        // File might vanish between readdir and stat; skip if so
+        try {
+          const stat = await fs.stat(full);
+          return {
+            name: d.name,
+            isDir: d.isDirectory(),
+            size: stat.size,
+            mtime: stat.mtime,
+          };
+        } catch (err) {
+          if (err.code === 'ENOENT') return null;
+          throw err;
+        }
       })
     );
 
-    res.json({
-      ok: true,
-      path: relPath,
-      items,
+    const items = itemsRaw.filter(Boolean);
+
+    // Optional: stable sort (dirs first, then alphabetical)
+    items.sort((a, b) => {
+      if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+      return a.name.localeCompare(b.name);
     });
+
+    res.json({ ok: true, path: relPath, items });
   } catch (err) {
     next(err);
   }
 });
+
 
 // Get a single file's contents
 // GET /api/spaces/:slug/file?path=relative/path.ext
@@ -2076,7 +2120,7 @@ app.post('/api/admin/space-requests/:id/reject', requireAdmin, async (req, res, 
 // ───────────────── Public space serving (static) ─────────────────
 
 // Serve static files for a space at /p/:slug/... (e.g. /p/demo-hud/index.html)
-app.use('/p/:slug', async (req, res, next) => {
+app.use('/p/:slug', portalsEmbedHeaders, async (req, res, next) => {
   try {
     await ensureSpacesRoot();
     const { slug } = req.params;

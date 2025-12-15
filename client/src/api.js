@@ -3,13 +3,15 @@
 const API_BASE = '';
 
 async function request(path, options = {}) {
+  const { headers: customHeaders, ...rest } = options;
+
   const res = await fetch(`${API_BASE}${path}`, {
     credentials: 'include',
+    ...rest,
     headers: {
       'Content-Type': 'application/json',
-      ...(options.headers || {})
+      ...(customHeaders || {}),
     },
-    ...options
   });
 
   const text = await res.text();
