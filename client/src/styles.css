@@ -106,7 +106,7 @@ body {
 
 .badge-pill.ok {
   border-color: var(--ok);
-  color: var(--ok);
+  color: var(--accent-secondary);
 }
 
 .badge-pill.warn {
@@ -490,7 +490,7 @@ body {
   width: 360px;
   border-radius: var(--radius-lg);
   border: 1px solid var(--panel-border);
-  background: rgba(15, 23, 42, 0.96);
+  background: var(--bg-main);
   box-shadow: var(--shadow-soft);
   padding: 18px 18px 16px;
   display: flex;
@@ -506,7 +506,7 @@ body {
 .login-card p {
   font-size: 13px;
   margin: 0;
-  color: var(--text-muted);
+  color: var(--text-main);
 }
 
 .login-card form {
@@ -519,8 +519,8 @@ body {
 .login-card input[type='email'] {
   border-radius: 999px;
   border: 1px solid var(--panel-border);
-  background: #020617;
-  color: var(--text-main);
+  background: var(--code-bg);
+  color: var(--code-text);
   padding: 8px 10px;
   font-size: 13px;
   outline: none;
@@ -687,7 +687,7 @@ body {
   min-width: 120px;
   padding: 4px;
   border-radius: 8px;
-  background: rgba(15, 23, 42, 0.98);
+  background: var(--button-alt);
   border: 1px solid var(--panel-border, #1f2937);
   box-shadow: 0 10px 30px rgba(15, 23, 42, 0.8);
   z-index: 40;
@@ -706,7 +706,7 @@ body {
 }
 
 .user-menu-item:hover {
-  background: rgba(37, 99, 235, 0.1);
+  background: var(--accent-secondary);
 }
 
 /* Responsive: stack vertically on narrower viewports */

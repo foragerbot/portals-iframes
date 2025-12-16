@@ -85,7 +85,7 @@ function LoginPage() {
   return (
     <div className="login-shell">
       <div className="login-card">
-        <h1>Sign in to Portals iFrames @ Jawn.Bot</h1>
+        <h1>Sign in to Portals iFrame Builder @ Jawn.Bot</h1>
         <p>
           Enter your email where we can send a login link. Click the link in the email to open your iFrame builder workspace.
         </p>
@@ -115,8 +115,8 @@ function LayoutShell({ me, usage, onLogout, children }) {
     <div className="app-shell">
       <header className="app-header">
         <div className="app-header-title">
-          <h1>Portals iFrames @ Jawn.Bot</h1>
-          <span>Custom Portals iFrame Builder</span>
+          <h1>Portals iFrame Builder @ Jawn.Bot</h1>
+          <span>Custom Builds & Page Hosting</span>
         </div>
         <div className="app-header-right">
           {usage && (
@@ -836,7 +836,7 @@ const onCopyIframeUrl = async () => {
                         onClick={handleOpenPreview}
                         disabled={!selectedPath}
                       >
-                        Preview iframe
+                        Preview iFrame
                       </button>
                     </div>
                     <div
@@ -960,7 +960,7 @@ const onCopyIframeUrl = async () => {
           >
             <div className="preview-modal-header">
               <div>
-                <div className="preview-modal-title">Iframe preview</div>
+                <div className="preview-modal-title">iFrame preview</div>
                 <div className="preview-modal-subtitle">
                   /p/{slug}/{selectedPath}
                 </div>
