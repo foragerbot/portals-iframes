@@ -422,7 +422,7 @@ async function sendMagicLinkEmail(email, url) {
     return;
   }
 
-  const subject = 'Sign in to Portals iFrame Builder @ Jawn.Bot';
+  const subject = 'Sign in to Portals iFrame Builder';
   const escapedUrl = url.replace(/"/g, '&quot;'); // minimal safety
 
   const html = `
@@ -442,7 +442,7 @@ async function sendMagicLinkEmail(email, url) {
         <td style="padding:18px 20px 8px; font-size:14px; color:#cbd5f5;">
           <p style="margin:0 0 10px;">Hi,</p>
           <p style="margin:0 0 14px;">
-            Click the button below to sign in to your account and access your Portals iFrame Builder @ Jawn.Bot.
+            Click the button below to sign in to your account and access your Portals iFrame Builder.
           </p>
           <p style="margin:0 0 18px; font-size:12px; color:#9ca3af;">
             This link expires in about <strong>15 minutes</strong> or after it&apos;s used once.
@@ -456,7 +456,7 @@ async function sendMagicLinkEmail(email, url) {
               <td align="center" style="border-radius:999px; background:linear-gradient(to right,#22d3ee,#a855f7);">
                 <a href="${escapedUrl}" 
                    style="display:inline-block; padding:10px 24px; font-size:13px; color:#020617; text-decoration:none; font-weight:600;">
-                  Sign in to Portals iFrame Builder @ Jawn.Bot
+                  Sign in to Portals iFrame Builder
                 </a>
               </td>
             </tr>
@@ -486,7 +486,7 @@ async function sendMagicLinkEmail(email, url) {
   `;
 
   const text = [
-    'Sign in to Portals iFrame Builder @ Jawn.Bot',
+    'Sign in to Portals iFrame Builder',
     '',
     `Click this link to sign in: ${url}`,
     '',
@@ -657,7 +657,7 @@ async function sendWorkspaceApprovalEmailToUser(user, spaceRecord, requestRecord
                 <td style="border-radius:999px; background:linear-gradient(to right,#22d3ee,#a855f7);">
                   <a href="${appUrl}"
                      style="display:inline-block; padding:8px 20px; font-size:13px; color:#020617; text-decoration:none; font-weight:600;">
-                    Open Portals iFrame Builder @ Jawn.Bot
+                    Open Portals iFrame Builder
                   </a>
                 </td>
               </tr>

@@ -85,7 +85,7 @@ function LoginPage() {
   return (
     <div className="login-shell">
       <div className="login-card">
-        <h1>Sign in to Portals iFrame Builder @ Jawn.Bot</h1>
+        <h1>Sign in to Portals iFrame Builder</h1>
         <p>
           Enter your email where we can send a login link. Click the link in the email to open your iFrame builder workspace.
         </p>
@@ -115,7 +115,7 @@ function LayoutShell({ me, usage, onLogout, children }) {
     <div className="app-shell">
       <header className="app-header">
         <div className="app-header-title">
-          <h1>Portals iFrame Builder @ Jawn.Bot</h1>
+          <h1>Portals iFrame Builder</h1>
           <span>Custom Builds & Page Hosting</span>
         </div>
         <div className="app-header-right">
@@ -172,111 +172,7 @@ function Sidebar({
   onToggleFiles,
   onToggleEditor,
   onToggleGpt,
-  onUsageRefresh
 }) {
-  const [assets, setAssets] = useState([]);
-  const [assetsLoading, setAssetsLoading] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [assetCopyStatus, setAssetCopyStatus] = useState('');
-
-  const fileInputRef = useRef(null);
-
-  const loadAssets = useCallback(
-    async (slug) => {
-      if (!slug) {
-        setAssets([]);
-        return;
-      }
-      setAssetsLoading(true);
-      try {
-        // list files under "assets" subdir
-        const data = await getSpaceFiles(slug, 'assets');
-        const items = (data.items || []).filter((i) => !i.isDir);
-        setAssets(items);
-      } catch (err) {
-        if (err.status === 404) {
-          // assets directory may not exist yet
-          setAssets([]);
-        } else {
-          console.error(err);
-        }
-      } finally {
-        setAssetsLoading(false);
-      }
-    },
-    []
-  );
-
-  useEffect(() => {
-    if (activeSlug) {
-      loadAssets(activeSlug);
-    } else {
-      setAssets([]);
-    }
-  }, [activeSlug, loadAssets]);
-
-  const handleUploadClick = () => {
-    if (!activeSlug) {
-      window.alert('Select a space first.');
-      return;
-    }
-    fileInputRef.current?.click();
-  };
-
-  const handleFilesSelected = async (e) => {
-    const fileList = Array.from(e.target.files || []);
-    if (!fileList.length || !activeSlug) {
-      e.target.value = '';
-      return;
-    }
-
-    setUploading(true);
-    try {
-      await uploadSpaceAssets(activeSlug, fileList, 'assets');
-      await loadAssets(activeSlug);
-      if (onUsageRefresh) {
-        onUsageRefresh();
-      }
-    } catch (err) {
-      console.error(err);
-      window.alert('Failed to upload assets. Check console for details.');
-    } finally {
-      setUploading(false);
-      e.target.value = '';
-    }
-  };
-
-  const handleDeleteAsset = async (relPath) => {
-    if (!activeSlug) return;
-    if (!window.confirm(`Delete asset "${relPath}"? This cannot be undone.`)) return;
-
-    try {
-      await deleteSpaceAsset(activeSlug, relPath);
-      await loadAssets(activeSlug);
-      if (onUsageRefresh) {
-        onUsageRefresh();
-      }
-    } catch (err) {
-      console.error(err);
-      window.alert('Failed to delete asset. Check console for details.');
-    }
-  };
-
-  const handleCopyAssetPath = async (relPath) => {
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(relPath);
-        setAssetCopyStatus('Copied!');
-        setTimeout(() => setAssetCopyStatus(''), 1500);
-      } else {
-        window.prompt('Copy asset path:', relPath);
-      }
-    } catch (err) {
-      console.error(err);
-      window.alert('Failed to copy asset path. Here it is:\n\n' + relPath);
-    }
-  };
-
   return (
     <aside className="app-sidebar">
       {/* SPACES */}
@@ -299,7 +195,9 @@ function Sidebar({
                 <div className="space-item-name">{s.slug}</div>
                 <div className="space-item-meta">
                   {s.quotaMb ?? '—'} MB quota
-                  {s.slug === usage?.slug ? ` · ${usage.usedMb.toFixed(2)} MB used` : ''}
+                  {s.slug === usage?.slug
+                    ? ` · ${usage.usedMb.toFixed(2)} MB used`
+                    : ''}
                 </div>
               </li>
             ))}
@@ -320,13 +218,23 @@ function Sidebar({
                 <div
                   className="usage-bar-fill"
                   style={{
-                    width: `${Math.min(100, (usage.usedMb / usage.quotaMb) * 100)}%`
+                    width: `${Math.min(
+                      100,
+                      (usage.usedMb / usage.quotaMb) * 100
+                    )}%`,
                   }}
                 />
               </div>
             </div>
-            <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)' }}>
-              GPT {usage.gptUsage.calls} / {usage.gptUsage.dailyLimit} calls today
+            <div
+              style={{
+                marginTop: 6,
+                fontSize: 11,
+                color: 'var(--text-muted)',
+              }}
+            >
+              GPT {usage.gptUsage.calls} / {usage.gptUsage.dailyLimit} calls
+              today
             </div>
           </>
         ) : (
@@ -363,10 +271,180 @@ function Sidebar({
           </button>
         </div>
       </div>
+    </aside>
+  );
+}
 
-      {/* ASSETS */}
-      <div className="sidebar-section">
-        <h2>Assets</h2>
+function AssetsPanel({ slug, onUsageRefresh, onAssetCountChange }) {
+  const [assets, setAssets] = useState([]);
+  const [assetsLoading, setAssetsLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState('');
+  const [assetCopyStatus, setAssetCopyStatus] = useState('');
+
+  const [assetPreviewOpen, setAssetPreviewOpen] = useState(false);
+  const [assetPreviewUrl, setAssetPreviewUrl] = useState('');
+  const [assetPreviewName, setAssetPreviewName] = useState('');
+  const [assetPreviewKey, setAssetPreviewKey] = useState(0);
+
+  const [activeIndex, setActiveIndex] = useState(0); // for keyboard nav
+
+  const fileInputRef = useRef(null);
+
+  const loadAssets = useCallback(async () => {
+    if (!slug) {
+      setAssets([]);
+      onAssetCountChange?.(0);
+      setActiveIndex(0);
+      return;
+    }
+    setAssetsLoading(true);
+    try {
+      const data = await getSpaceFiles(slug, 'assets');
+      const items = (data.items || []).filter((i) => !i.isDir);
+      setAssets(items);
+      onAssetCountChange?.(items.length);
+
+      setActiveIndex((prev) => {
+        if (!items.length) return 0;
+        if (prev < 0) return 0;
+        if (prev >= items.length) return items.length - 1;
+        return prev;
+      });
+    } catch (err) {
+      if (err.status === 404) {
+        setAssets([]);
+        onAssetCountChange?.(0);
+        setActiveIndex(0);
+      } else {
+        console.error(err);
+      }
+    } finally {
+      setAssetsLoading(false);
+    }
+  }, [slug, onAssetCountChange]);
+
+  useEffect(() => {
+    loadAssets();
+  }, [loadAssets]);
+
+  const handleUploadClick = () => {
+    if (!slug) {
+      window.alert('Select a space first.');
+      return;
+    }
+    fileInputRef.current?.click();
+  };
+
+  const handleFilesSelected = async (e) => {
+    const fileList = Array.from(e.target.files || []);
+    if (!fileList.length || !slug) {
+      e.target.value = '';
+      return;
+    }
+
+    const count = fileList.length;
+    setUploading(true);
+    setUploadStatus(`Uploading ${count} file${count !== 1 ? 's' : ''}…`);
+    try {
+      await uploadSpaceAssets(slug, fileList, 'assets');
+      await loadAssets();
+      onUsageRefresh?.();
+      setUploadStatus(`Uploaded ${count} file${count !== 1 ? 's' : ''}.`);
+      setTimeout(() => setUploadStatus(''), 3000);
+    } catch (err) {
+      console.error(err);
+      setUploadStatus('Failed to upload assets.');
+      window.alert('Failed to upload assets. Check console for details.');
+    } finally {
+      setUploading(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleDeleteAsset = async (relPath) => {
+    if (!slug) return;
+    if (!window.confirm(`Delete asset "${relPath}"? This cannot be undone.`)) return;
+
+    try {
+      await deleteSpaceAsset(slug, relPath);
+      await loadAssets();
+      onUsageRefresh?.();
+    } catch (err) {
+      console.error(err);
+      window.alert('Failed to delete asset. Check console for details.');
+    }
+  };
+
+  const handleCopyAssetPath = async (relPath) => {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(relPath);
+        setAssetCopyStatus('Copied!');
+        setTimeout(() => setAssetCopyStatus(''), 1500);
+      } else {
+        window.prompt('Copy asset path:', relPath);
+      }
+    } catch (err) {
+      console.error(err);
+      window.alert('Failed to copy asset path. Here it is:\n\n' + relPath);
+    }
+  };
+
+  const getAssetKind = (name) => {
+    const ext = (name.split('.').pop() || '').toLowerCase();
+    const imgExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'avif'];
+    const videoExts = ['mp4', 'webm', 'mov', 'm4v'];
+    const audioExts = ['mp3', 'wav', 'ogg', 'm4a'];
+    if (imgExts.includes(ext)) return 'image';
+    if (videoExts.includes(ext)) return 'video';
+    if (audioExts.includes(ext)) return 'audio';
+    return 'other';
+  };
+
+  const openPreview = (relPath, name) => {
+    if (!slug) return;
+    const url = `${IFRAME_ORIGIN}/p/${encodeURIComponent(
+      slug
+    )}/${encodeURIComponent(relPath)}`;
+    setAssetPreviewUrl(url);
+    setAssetPreviewName(name);
+    setAssetPreviewKey((k) => k + 1);
+    setAssetPreviewOpen(true);
+  };
+
+  const closePreview = () => {
+    setAssetPreviewOpen(false);
+  };
+
+  const handleAssetListKeyDown = (e) => {
+    if (!assets.length) return;
+
+    let idx = activeIndex;
+    if (idx < 0 || idx >= assets.length) idx = 0;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      const next = Math.min(assets.length - 1, idx + 1);
+      setActiveIndex(next);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      const next = Math.max(0, idx - 1);
+      setActiveIndex(next);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const asset = assets[idx];
+      if (!asset) return;
+      const relPath = `assets/${asset.name}`;
+      openPreview(relPath, asset.name);
+    }
+  };
+
+  return (
+    <>
+      <div className="files-assets">
+        <div className="files-assets-header">Assets</div>
+
         <input
           type="file"
           multiple
@@ -374,23 +452,15 @@ function Sidebar({
           style={{ display: 'none' }}
           onChange={handleFilesSelected}
         />
-        <button
-          type="button"
-          className="button small full-width"
-          onClick={handleUploadClick}
-          disabled={uploading || !activeSlug}
-        >
-          {uploading ? 'Uploading…' : 'Upload assets'}
-        </button>
 
-        <div style={{ marginTop: 8, maxHeight: 140, overflowY: 'auto' }}>
+      <div className="files-assets-list">
           {assetsLoading ? (
             <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
               Loading assets…
             </div>
           ) : assets.length === 0 ? (
             <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-              No assets yet. Upload images/fonts into <code>assets/</code>.
+              No assets yet. Upload into <code>assets/</code>.
             </div>
           ) : (
             <ul
@@ -400,20 +470,28 @@ function Sidebar({
                 margin: 0,
                 display: 'flex',
                 flexDirection: 'column',
-                gap: 4
+                gap: 4,
               }}
+              tabIndex={0}
+              onKeyDown={handleAssetListKeyDown}
             >
-              {assets.map((a) => {
+              {assets.map((a, index) => {
                 const relPath = `assets/${a.name}`;
+                const isActive = index === activeIndex;
                 return (
-                  <li key={a.name} style={{ fontSize: 11 }}>
+                  <li
+                    key={a.name}
+                    className={`asset-item${isActive ? ' active' : ''}`}
+                    style={{ fontSize: 11 }}
+                    onClick={() => setActiveIndex(index)}
+                  >
                     <div style={{ color: 'var(--text-main)' }}>{a.name}</div>
                     <div
                       style={{
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'space-between',
-                        gap: 4
+                        gap: 4,
                       }}
                     >
                       <code
@@ -421,7 +499,11 @@ function Sidebar({
                           fontFamily:
                             "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
                           fontSize: 10,
-                          color: 'var(--text-muted)'
+                          color: 'var(--text-muted)',
+                          flex: '1 1 auto',
+                          minWidth: 0,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
                         }}
                       >
                         {relPath}
@@ -435,13 +517,21 @@ function Sidebar({
                         Copy
                       </button>
                       <button
-            type="button"
-            className="asset-delete-btn"
-            onClick={() => handleDeleteAsset(relPath)}
-            title="Delete asset"
-          >
-            ✕
-          </button>
+                        type="button"
+                        className="asset-preview-btn"
+                        onClick={() => openPreview(relPath, a.name)}
+                        title="Preview asset"
+                      >
+                        Preview
+                      </button>
+                      <button
+                        type="button"
+                        className="asset-delete-btn"
+                        onClick={() => handleDeleteAsset(relPath)}
+                        title="Delete asset"
+                      >
+                        ✕
+                      </button>
                     </div>
                   </li>
                 );
@@ -449,26 +539,131 @@ function Sidebar({
             </ul>
           )}
         </div>
+
         {assetCopyStatus && (
-          <div style={{ marginTop: 4, fontSize: 10, color: 'var(--text-muted)' }}>
+          <div
+            style={{ marginTop: 4, fontSize: 10, color: 'var(--text-muted)' }}
+          >
             {assetCopyStatus}
           </div>
         )}
+
+      <div className="files-assets-footer">
+          <button
+            type="button"
+            className="button small full-width"
+            onClick={handleUploadClick}
+            disabled={uploading || !slug}
+          >
+            {uploading ? 'Uploading…' : 'Upload assets'}
+          </button>
+        </div>
+
+        {uploadStatus && (
+          <div
+            style={{
+              marginTop: 4,
+              fontSize: 11,
+              color: 'var(--text-muted)',
+            }}
+          >
+            {uploadStatus}
+          </div>
+        )}
       </div>
-    </aside>
+
+      {assetPreviewOpen && assetPreviewUrl && (
+        <div className="preview-modal-backdrop" onClick={closePreview}>
+          <div
+            className="preview-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="preview-modal-header">
+              <div>
+                <div className="preview-modal-title">Asset preview</div>
+                <div className="preview-modal-subtitle">
+                  /p/{slug}/{assetPreviewName}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="preview-modal-close"
+                onClick={closePreview}
+                aria-label="Close asset preview"
+              >
+                ×
+              </button>
+            </div>
+            <div className="preview-modal-body">
+              {(() => {
+                const kind = getAssetKind(assetPreviewName);
+                if (kind === 'image') {
+                  return (
+                    <img
+                      key={assetPreviewKey}
+                      src={assetPreviewUrl}
+                      alt={assetPreviewName}
+                      className="preview-modal-media"
+                    />
+                  );
+                }
+                if (kind === 'video') {
+                  return (
+                    <video
+                      key={assetPreviewKey}
+                      src={assetPreviewUrl}
+                      controls
+                      className="preview-modal-media"
+                    />
+                  );
+                }
+                if (kind === 'audio') {
+                  return (
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        width: '100%',
+                        padding: 16,
+                      }}
+                    >
+                      <audio
+                        key={assetPreviewKey}
+                        src={assetPreviewUrl}
+                        controls
+                        style={{ width: '100%' }}
+                      />
+                    </div>
+                  );
+                }
+                return (
+                  <iframe
+                    key={assetPreviewKey}
+                    src={assetPreviewUrl}
+                    title={`Preview ${assetPreviewName}`}
+                    className="preview-modal-media"
+                  />
+                );
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
-
-// NOTE: SpaceEditor now accepts onUsageRefresh, and does NOT own usage state itself.
-// It calls onUsageRefresh() after save and GPT so the parent can re-fetch usage.
 function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
+  const [filesView, setFilesView] = useState('files');
+  const [assetCount, setAssetCount] = useState(0);
   const [files, setFiles] = useState([]);
   const [filesLoading, setFilesLoading] = useState(false);
   const [selectedPath, setSelectedPath] = useState('index.html');
   const [fileContent, setFileContent] = useState('');
   const [fileLoading, setFileLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
 
   const [gptPrompt, setGptPrompt] = useState('');
   const [gptResponse, setGptResponse] = useState('');
@@ -483,6 +678,31 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
 
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewReloadKey, setPreviewReloadKey] = useState(0);
+
+  const editorRef = useRef(null);
+
+  // 🔹 independent themes
+  const [editorTheme, setEditorTheme] = useState(() => {
+    if (typeof window === 'undefined') return 'default';
+    return localStorage.getItem('editorTheme') || 'default';
+  });
+
+  const [gptTheme, setGptTheme] = useState(() => {
+    if (typeof window === 'undefined') return 'default';
+    return localStorage.getItem('gptTheme') || 'default';
+  });
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('editorTheme', editorTheme);
+    }
+  }, [editorTheme]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('gptTheme', gptTheme);
+    }
+  }, [gptTheme]);
 
   const loadFiles = useCallback(async () => {
     setFilesLoading(true);
@@ -506,6 +726,7 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
         console.error(err);
         setFileContent('');
       } finally {
+        setHasUnsavedChanges(false);
         setFileLoading(false);
       }
     },
@@ -522,12 +743,35 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
     }
   }, [selectedPath, loadFile]);
 
+  // Warn if trying to close/refresh tab with unsaved changes
+  useEffect(() => {
+    const handleBeforeUnload = (e) => {
+      if (!hasUnsavedChanges) return;
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [hasUnsavedChanges]);
+
+  const handleSelectFile = (nextPath) => {
+    if (nextPath === selectedPath) return;
+    if (hasUnsavedChanges) {
+      const ok = window.confirm(
+        `You have unsaved changes in "${selectedPath}". Switch files and discard them?`
+      );
+      if (!ok) return;
+    }
+    setSelectedPath(nextPath);
+  };
+
   const onSave = async () => {
     if (!selectedPath) return;
     setSaving(true);
     try {
       await saveSpaceFile(slug, selectedPath, fileContent);
       await loadFiles();
+      setHasUnsavedChanges(false);
       if (onUsageRefresh) {
         onUsageRefresh();
       }
@@ -614,6 +858,7 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
           await loadFile(next);
         } else {
           setFileContent('');
+          setHasUnsavedChanges(false);
         }
       }
 
@@ -673,7 +918,7 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
     try {
       const data = await callSpaceGpt(slug, {
         prompt: gptPrompt,
-        filePath: selectedPath || undefined
+        filePath: selectedPath || undefined,
       });
       setGptResponse(data.message?.content || '');
       if (onUsageRefresh) {
@@ -686,34 +931,141 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
       setGptBusy(false);
     }
   };
-  
-const onCopyIframeUrl = async () => {
-  if (!selectedPath) return;
 
-  const url = `${IFRAME_ORIGIN}/p/${encodeURIComponent(slug)}/${encodeURIComponent(
-    selectedPath
-  )}`;
+    const handleGptKeyDown = (e) => {
+    if (e.key === 'Enter') {
+      // Alt+Enter (or any modifier) → let the browser insert a newline
+      if (e.altKey || e.shiftKey || e.metaKey || e.ctrlKey) {
+        return;
+      }
 
-  try {
-    setCopyingUrl(true);
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(url);
-    } else {
-      window.prompt('Copy iframe URL:', url);
+      // Bare Enter → send if possible
+      e.preventDefault();
+      if (!gptBusy && gptPrompt.trim()) {
+        onRunGpt();
+      }
     }
-    setCopyStatus('Copied!');
-    setTimeout(() => setCopyStatus(''), 2000);
-  } catch (err) {
-    console.error(err);
-    window.alert('Failed to copy URL. Here it is:\n\n' + url);
-  } finally {
-    setCopyingUrl(false);
+  };
+
+  // Extract the first fenced code block from GPT markdown, if any
+  const extractFirstCodeBlock = (markdown) => {
+    if (!markdown) return null;
+    const fenceRegex = /```[^\n]*\n([\s\S]*?)```/;
+    const match = markdown.match(fenceRegex);
+    if (match && match[1]) {
+      return match[1].trimEnd() + '\n';
+    }
+    return null;
+  };
+
+  const onCopyGptText = async () => {
+    if (!gptResponse) return;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(gptResponse);
+      } else {
+        window.prompt('Copy GPT output:', gptResponse);
+      }
+    } catch (err) {
+      console.error(err);
+      window.alert('Failed to copy GPT output. Check console for details.');
+    }
+  };
+
+  const handleFileListKeyDown = (e) => {
+  if (!files.length) return;
+
+  // Where are we now?
+  const currentIndex = files.findIndex((f) => f.name === selectedPath);
+  const idx = currentIndex === -1 ? 0 : currentIndex;
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    const nextIndex = Math.min(files.length - 1, idx + 1);
+    const nextName = files[nextIndex].name;
+    handleSelectFile(nextName);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    const nextIndex = Math.max(0, idx - 1);
+    const nextName = files[nextIndex].name;
+    handleSelectFile(nextName);
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (idx >= 0 && idx < files.length) {
+      const name = files[idx].name;
+      handleSelectFile(name);
+    }
   }
 };
 
+  const onInsertGptCode = () => {
+    if (!gptResponse || !selectedPath) return;
+
+    const code = extractFirstCodeBlock(gptResponse) || gptResponse;
+    const textarea = editorRef.current;
+
+    if (!textarea) {
+      setFileContent((prev) => (prev || '') + '\n' + code);
+      setHasUnsavedChanges(true);
+      return;
+    }
+
+    const current = fileContent || '';
+    const start = textarea.selectionStart ?? current.length;
+    const end = textarea.selectionEnd ?? start;
+
+    const before = current.slice(0, start);
+    const after = current.slice(end);
+
+    const nextContent = before + code + after;
+
+    setFileContent(nextContent);
+    setHasUnsavedChanges(true);
+
+    const cursorPos = before.length + code.length;
+    requestAnimationFrame(() => {
+      try {
+        textarea.focus();
+        textarea.setSelectionRange(cursorPos, cursorPos);
+      } catch {
+        // ignore
+      }
+    });
+  };
+
+  const onCopyIframeUrl = async () => {
+    if (!selectedPath) return;
+
+    const url = `${IFRAME_ORIGIN}/p/${encodeURIComponent(slug)}/${encodeURIComponent(
+      selectedPath
+    )}`;
+
+    try {
+      setCopyingUrl(true);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(url);
+      } else {
+        window.prompt('Copy iframe URL:', url);
+      }
+      setCopyStatus('Copied!');
+      setTimeout(() => setCopyStatus(''), 2000);
+    } catch (err) {
+      console.error(err);
+      window.alert('Failed to copy URL. Here it is:\n\n' + url);
+    } finally {
+      setCopyingUrl(false);
+    }
+  };
+
   const handleOpenPreview = () => {
     if (!selectedPath) return;
-    setPreviewReloadKey((k) => k + 1); // bump key so iframe reloads
+    if (hasUnsavedChanges) {
+      const ok = window.confirm(
+        'You have unsaved changes. Preview will show the last saved version. Open preview anyway?'
+      );
+      if (!ok) return;
+    }
+    setPreviewReloadKey((k) => k + 1);
     setPreviewOpen(true);
   };
 
@@ -725,82 +1077,160 @@ const onCopyIframeUrl = async () => {
     <>
       <div className="app-content">
         <div className="editor-shell">
-          {/* Files panel */}
-          {showFiles && (
-            <div className="panel panel--files">
-              <div className="panel-header">
-                <div className="panel-header-left">
-                  <div className="panel-title">Files</div>
-                  <div className="panel-subtitle">
-                    {filesLoading ? 'Loading…' : `${files.length} files`}
-                  </div>
-                </div>
-              </div>
+{/* Files panel */}
+{showFiles && (
+  <div className="panel panel--files">
+    <div className="panel-header">
+      <div className="panel-header-left">
+        <div className="panel-title">Files</div>
+        <div className="panel-subtitle">
+          {filesView === 'files'
+            ? (filesLoading
+                ? 'Loading…'
+                : `${files.length} file${files.length === 1 ? '' : 's'}`)
+            : `${assetCount} asset${assetCount === 1 ? '' : 's'}`}
+        </div>
+      </div>
 
-              <div className="panel-body-files">
-                <ul className="file-list">
-                  {files.map((f) => (
-                    <li
-                      key={f.name}
-                      className={
-                        'file-item' + (selectedPath === f.name ? ' active' : '')
-                      }
-                      onClick={() => setSelectedPath(f.name)}
-                    >
-                      <span className="file-item-name">{f.name}</span>
-                      <span className="file-item-actions">
-                        <button
-                          type="button"
-                          className="file-item-rename"
-                          title="Rename file"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onRenameFile(f.name);
-                          }}
-                          disabled={renamingFile}
-                        >
-                          ✎
-                        </button>
-                        <button
-                          type="button"
-                          className="file-item-delete"
-                          title="Delete file"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onDeleteFile(f.name);
-                          }}
-                          disabled={deletingFile}
-                        >
-                          ✕
-                        </button>
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
+      <div className="panel-header-right">
+        <div className="files-toggle">
+          <button
+            type="button"
+            className={
+              'files-toggle-button' +
+              (filesView === 'files' ? ' active' : '')
+            }
+            onClick={() => setFilesView('files')}
+          >
+            Files
+          </button>
+          <button
+            type="button"
+            className={
+              'files-toggle-button' +
+              (filesView === 'assets' ? ' active' : '')
+            }
+            onClick={() => setFilesView('assets')}
+          >
+            Assets
+          </button>
+        </div>
+      </div>
+    </div>
 
-              <div style={{ marginTop: 8 }}>
-                <button
-                  type="button"
-                  className="button small full-width"
-                  onClick={onNewFile}
-                  disabled={creatingFile}
-                >
-                  {creatingFile ? 'Creating…' : '+ New file'}
-                </button>
-              </div>
-            </div>
-          )}
+    {filesView === 'files' ? (
+      <>
+        <div className="panel-body-files">
+          <ul
+            className="file-list"
+            tabIndex={0}
+            onKeyDown={handleFileListKeyDown}
+          >
+              {files.map((f) => (
+              <li
+                key={f.name}
+                className={
+                  'file-item' + (selectedPath === f.name ? ' active' : '')
+                }
+                onClick={() => handleSelectFile(f.name)}
+              >
+                <span className="file-item-name">{f.name}</span>
+                <span className="file-item-actions">
+                  <button
+                    type="button"
+                    className="file-item-rename"
+                    title="Rename file"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRenameFile(f.name);
+                    }}
+                    disabled={renamingFile}
+                  >
+                    ✎
+                  </button>
+                  <button
+                    type="button"
+                    className="file-item-delete"
+                    title="Delete file"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDeleteFile(f.name);
+                    }}
+                    disabled={deletingFile}
+                  >
+                    ✕
+                  </button>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        <div style={{ marginTop: 8 }}>
+          <button
+            type="button"
+            className="button small full-width"
+            onClick={onNewFile}
+            disabled={creatingFile}
+          >
+            {creatingFile ? 'Creating…' : '+ New file'}
+          </button>
+        </div>
+      </>
+    ) : (
+      <AssetsPanel
+        slug={slug}
+        onUsageRefresh={onUsageRefresh}
+        onAssetCountChange={setAssetCount}
+      />
+    )}
+  </div>
+)}
+
 
           {/* Editor panel */}
           {showEditor && (
-            <div className="panel panel--editor">
+            <div className={`panel panel--editor theme-${editorTheme}`}>
               <div className="panel-header">
                 <div className="panel-header-left">
                   <div className="panel-title">Editor</div>
-                  <div className="panel-subtitle">{selectedPath || 'Select a file'}</div>
+                  <div className="panel-subtitle">
+                    {selectedPath ? (
+                      <>
+                        {selectedPath}
+                        {hasUnsavedChanges && (
+                          <span
+                            style={{
+                              marginLeft: 6,
+                              fontSize: 11,
+                              color: '#f97373',
+                            }}
+                          >
+                            ● unsaved
+                          </span>
+                        )}
+                      </>
+                    ) : (
+                      'Select a file'
+                    )}
+                  </div>
+                </div>
+                <div>
+                <select
+                  className="theme-select"
+                  value={editorTheme}
+                  onChange={(e) => setEditorTheme(e.target.value)}
+                  >
+                  <option value="default">Default</option>
+                  <option value="midnight">Midnight</option>
+                  <option value="paper">Paper</option>
+                  <option value="ocean">Ocean</option>
+                  <option value="flower">Flower</option>
+                </select>
+
                 </div>
               </div>
+
               {fileLoading ? (
                 <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                   Loading file…
@@ -808,9 +1238,13 @@ const onCopyIframeUrl = async () => {
               ) : (
                 <>
                   <textarea
+                    ref={editorRef}
                     className="editor-textarea"
                     value={fileContent}
-                    onChange={(e) => setFileContent(e.target.value)}
+                    onChange={(e) => {
+                      setFileContent(e.target.value);
+                      setHasUnsavedChanges(true);
+                    }}
                     spellCheck={false}
                   />
                   <div className="editor-actions">
@@ -818,9 +1252,9 @@ const onCopyIframeUrl = async () => {
                       <button
                         className="button primary"
                         onClick={onSave}
-                        disabled={saving}
+                        disabled={saving || !hasUnsavedChanges || !selectedPath}
                       >
-                        {saving ? 'Saving…' : 'Save file'}
+                        {saving ? 'Saving…' : hasUnsavedChanges ? 'Save file' : 'Saved'}
                       </button>
                       <button
                         className="button small"
@@ -846,13 +1280,27 @@ const onCopyIframeUrl = async () => {
                         textAlign: 'right',
                       }}
                     >
-                      {copyStatus ? (
-                        copyStatus
-                      ) : (
-                        <>
-                          Changes live at <code>/p/{slug}/{selectedPath}</code>
-                        </>
-                      )}
+                      {copyStatus
+                        ? copyStatus
+                        : selectedPath && (
+                            <>
+                              {hasUnsavedChanges ? (
+                                <>
+                                  Unsaved changes — last published at{' '}
+                                  <code>
+                                    /p/{slug}/{selectedPath}
+                                  </code>
+                                </>
+                              ) : (
+                                <>
+                                  Live at{' '}
+                                  <code>
+                                    /p/{slug}/{selectedPath}
+                                  </code>
+                                </>
+                              )}
+                            </>
+                          )}
                     </div>
                   </div>
                 </>
@@ -862,15 +1310,34 @@ const onCopyIframeUrl = async () => {
 
           {/* GPT panel */}
           {showGpt && (
-            <div className="panel panel--gpt">
-              <div className="panel-header">
+              <div
+               className={`panel panel--gpt theme-${gptTheme} ${
+                 !showEditor ? 'panel--gpt-full' : ''
+               }`}
+                >      
+                <div className="panel-header">
                 <div className="panel-header-left">
                   <div className="panel-title">GPT helper</div>
                   <div className="panel-subtitle">
                     Model: gpt-4.1-mini · File: {selectedPath || 'none'}
                   </div>
                 </div>
+                <div>
+                  <select
+                    className="theme-select"
+                    value={gptTheme}
+                    onChange={(e) => setGptTheme(e.target.value)}
+                  >
+                    <option value="default">Default</option>
+                    <option value="midnight">Midnight</option>
+                    <option value="paper">Paper</option>
+                    <option value="ocean">Ocean</option>
+                    <option value="flower">Flower</option>
+                  </select>
+
+                </div>
               </div>
+
               <div className="gpt-messages">
                 {gptResponse ? (
                   <ReactMarkdown
@@ -923,21 +1390,42 @@ const onCopyIframeUrl = async () => {
                   placeholder="e.g. “Add a pulsing border around the HUD”"
                   value={gptPrompt}
                   onChange={(e) => setGptPrompt(e.target.value)}
+                  onKeyDown={handleGptKeyDown}
                 />
                 <div
                   style={{
                     display: 'flex',
                     justifyContent: 'space-between',
                     gap: 8,
+                    alignItems: 'center',
+                    flexWrap: 'wrap',
                   }}
                 >
-                  <button
-                    className="button primary"
-                    onClick={onRunGpt}
-                    disabled={gptBusy || !gptPrompt.trim()}
-                  >
-                    {gptBusy ? 'Thinking…' : 'Ask GPT'}
-                  </button>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    <button
+                      className="button primary"
+                      onClick={onRunGpt}
+                      disabled={gptBusy || !gptPrompt.trim()}
+                    >
+                      {gptBusy ? 'Thinking…' : 'Ask GPT'}
+                    </button>
+                    <button
+                      className="button small"
+                      type="button"
+                      onClick={onCopyGptText}
+                      disabled={!gptResponse}
+                    >
+                      Copy output
+                    </button>
+                    <button
+                      className="button small"
+                      type="button"
+                      onClick={onInsertGptCode}
+                      disabled={!gptResponse || !selectedPath}
+                    >
+                      Insert into editor
+                    </button>
+                  </div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                     Uses your daily GPT quota.
                   </div>
@@ -974,16 +1462,17 @@ const onCopyIframeUrl = async () => {
                 ×
               </button>
             </div>
-            <div className="preview-modal-body">
+            <div className="preview-modal-body preview-modal-body--iframe">
             <iframe
               key={previewReloadKey}
-              src={`${IFRAME_ORIGIN}/p/${encodeURIComponent(slug)}/${encodeURIComponent(
-                selectedPath
-              )}`}
-              title={`Preview ${slug}/${selectedPath}`}
+             src={`${IFRAME_ORIGIN}/p/${encodeURIComponent(slug)}/${encodeURIComponent(
+               selectedPath
+             )}`}
+             title={`Preview ${slug}/${selectedPath}`}
+             className="preview-modal-iframe"
             />
-
             </div>
+
           </div>
         </div>
       )}
@@ -1011,6 +1500,38 @@ function DashboardPage() {
   const [workspaceNote, setWorkspaceNote] = useState('');
 
   const [pendingRequest, setPendingRequest] = useState(null);
+
+  // track when we're in "mobile/stacked" mode
+  const [isNarrow, setIsNarrow] = useState(
+    typeof window !== 'undefined' ? window.innerWidth <= 1024 : false
+  );
+    useEffect(() => {
+    const onResize = () => {
+      setIsNarrow(window.innerWidth <= 1024);
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+    // When in narrow mode, ensure only one panel is active at a time
+  useEffect(() => {
+    if (!isNarrow) return;
+
+    const activeCount = [showFiles, showEditor, showGpt].filter(Boolean).length;
+    if (activeCount <= 1) return; // already fine
+
+    // Priority: Editor > GPT > Files
+    if (showEditor) {
+      setShowFiles(false);
+      setShowGpt(false);
+    } else if (showGpt) {
+      setShowFiles(false);
+    } else if (showFiles) {
+      setShowEditor(false);
+      setShowGpt(false);
+    }
+  }, [isNarrow, showFiles, showEditor, showGpt]);
+
 
   // Redirect to /login if not logged in
   useEffect(() => {
@@ -1058,6 +1579,40 @@ function DashboardPage() {
       navigate('/login', { replace: true });
     }
   }, [navigate, refresh]);
+
+    const handleToggleFiles = useCallback(() => {
+    setShowFiles((prev) => {
+      const next = !prev;
+      if (next && isNarrow) {
+        // on narrow screens, Files wins; hide others
+        setShowEditor(false);
+        setShowGpt(false);
+      }
+      return next;
+    });
+  }, [isNarrow]);
+
+  const handleToggleEditor = useCallback(() => {
+    setShowEditor((prev) => {
+      const next = !prev;
+      if (next && isNarrow) {
+        setShowFiles(false);
+        setShowGpt(false);
+      }
+      return next;
+    });
+  }, [isNarrow]);
+
+  const handleToggleGpt = useCallback(() => {
+    setShowGpt((prev) => {
+      const next = !prev;
+      if (next && isNarrow) {
+        setShowFiles(false);
+        setShowEditor(false);
+      }
+      return next;
+    });
+  }, [isNarrow]);
 
   const handleRequestWorkspace = async () => {
     setWorkspaceRequestStatus('');
@@ -1120,9 +1675,9 @@ function DashboardPage() {
         showFiles={showFiles}
         showEditor={showEditor}
         showGpt={showGpt}
-        onToggleFiles={() => setShowFiles((v) => !v)}
-        onToggleEditor={() => setShowEditor((v) => !v)}
-        onToggleGpt={() => setShowGpt((v) => !v)}
+        onToggleFiles={handleToggleFiles}
+        onToggleEditor={handleToggleEditor}
+        onToggleGpt={handleToggleGpt}
         onUsageRefresh={() => refreshUsage(activeSlug)}
       />
       {activeSlug ? (
@@ -1478,9 +2033,9 @@ function AdminDashboard() {
           that the API expects in the <code>x-admin-token</code> header.
         </p>
 
-        <form onSubmit={handleSaveToken} style={{ marginBottom: 10 }}>
-          <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-            Admin token
+        <form onSubmit={handleSaveToken} style={{ marginBottom: 10, border: '1px solid var(--panel-border)', borderRadius: 8, padding: '6px 10px', background: 'var(--bg-elevated)' }}>
+          <label style={{ fontSize: 12, color: 'var(--danger)' }}>
+            Admin Password:
             <input
               name="adminToken"
               type="password"
@@ -1490,15 +2045,15 @@ function AdminDashboard() {
                 width: '100%',
                 borderRadius: 999,
                 border: '1px solid var(--panel-border)',
-                background: '#020617',
+                background: 'var(--bg-main)',
                 color: 'var(--text-main)',
                 padding: '6px 10px',
                 fontSize: 13
               }}
             />
           </label>
-          <div style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-            <button className="button primary" type="submit">
+          <div style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', gap: 8}}>
+            <button className="button small" type="submit">
               Save & load requests
             </button>
             <button
@@ -1523,11 +2078,11 @@ function AdminDashboard() {
             padding: 8,
             borderRadius: 8,
             border: '1px solid var(--panel-border)',
-            background: 'rgba(15,23,42,0.9)',
+            background: 'var(--bg-elevated)',
           }}
         >
-          <h2 style={{ fontSize: 14, margin: '0 0 6px' }}>Approved emails</h2>
-          <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '0 0 8px' }}>
+          <h2 style={{ fontSize: 14, margin: '0 0 6px', color: 'var(--accent-primary)' }}>Approved emails</h2>
+          <p style={{ fontSize: 12, color: 'var(--text-light)', margin: '0 0 8px' }}>
             Only emails on this allowlist can receive magic-link logins.
           </p>
 
@@ -1550,7 +2105,7 @@ function AdminDashboard() {
                 minWidth: 0,
                 borderRadius: 999,
                 border: '1px solid var(--panel-border)',
-                background: '#020617',
+                background: 'var(--bg-main)',
                 color: 'var(--text-main)',
                 padding: '6px 10px',
                 fontSize: 13,
@@ -1567,11 +2122,11 @@ function AdminDashboard() {
           </div>
 
           {allowlistLoading ? (
-            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            <div style={{ fontSize: 12, color: 'var(--ok)' }}>
               Loading allowlist…
             </div>
           ) : approvedUsers.length === 0 ? (
-            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            <div style={{ fontSize: 12, color: 'var(--accent-secondary)' }}>
               No approved emails yet. Add at least one to allow logins.
             </div>
           ) : (
@@ -1598,9 +2153,9 @@ function AdminDashboard() {
                   }}
                 >
                   <div>
-                    <span style={{ color: 'var(--text-main)' }}>{u.email}</span>
+                    <span style={{ color: 'var(--text-light)' }}>{u.email}</span>
                     {u.createdAt && (
-                      <span style={{ color: 'var(--text-muted)', marginLeft: 6 }}>
+                      <span style={{ color: 'var(--text-light)', marginLeft: 6 }}>
                         · {u.createdAt}
                       </span>
                     )}

@@ -52,28 +52,32 @@ body {
 
 .app-shell {
   min-height: 100vh;
-  max-height: 100vh;
   display: flex;
   flex-direction: column;
 }
 
 .app-header {
-  height: 50px;
+  min-height: 50px;
+  height: auto;
+
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 18px;
+  padding: 6px 18px;
   border-bottom: 1px solid var(--panel-border);
-  /*background: radial-gradient(circle at top left, rgba(34, 211, 238, 0.16), transparent 55%),
-    rgba(15, 23, 42, 0.92);*/
-    background: var(--bg-elevated);
+  background: var(--bg-elevated);
   backdrop-filter: blur(12px);
+
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .app-header-title {
   display: flex;
   align-items: baseline;
   gap: 10px;
+  flex: 1 1 auto;
+  min-width: 0; /* prevents weird shrinking */
 }
 
 .app-header-title h1 {
@@ -92,7 +96,8 @@ body {
 .app-header-right {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .badge-pill {
@@ -137,6 +142,7 @@ body {
   border: 1px solid var(--panel-border);
   background: var(  --bg-main);
   padding: 10px;
+  height:100%;
 }
 
 .sidebar-section h2 {
@@ -202,6 +208,13 @@ body {
   height: 100%;
   box-sizing: border-box;
 }
+
+/* If only one panel is visible AND it's not the Files panel, let it fill the space */
+.editor-shell > .panel:not(.panel--files):only-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 /* Panels */
 
 .panel {
@@ -244,7 +257,7 @@ body {
   border-radius: 999px;
   border: 1px solid var(--accent-secondary);
   color: var(--text-main);
-  font-size: 10px;
+  font-size: 14px;
   padding: 4px 7px;
   cursor: pointer;
   display: inline-flex;
@@ -258,14 +271,15 @@ body {
 }
 
 .panel-toggle span {
-  font-size: 10px;
+  font-size: 14px;
 }
 
 
 /* Panels with roles */
 .panel--files {
-  flex: 0 0 200px;
-  min-width: 180px;
+  flex: 0 0 250px;
+  min-width: 220px;
+  height:100%;
 }
 
 .panel--editor {
@@ -277,6 +291,48 @@ body {
   flex: 0 0 32%;
   min-width: 300px;
 }
+
+/* When editor is hidden, let GPT panel act as the main content column */
+.panel--gpt-full {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.panel-header-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.files-toggle {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 999px;
+  border: 1px solid var(--panel-border);
+  background: var(--bg-main);
+}
+
+.files-toggle-button {
+  border: none;
+  background: transparent;
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  color: var(--text-muted);
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.files-toggle-button.active {
+  background: var(--button-alt);
+  color: var(--text-main);
+}
+
+.files-toggle-button:not(.active):hover {
+  color: var(--accent-secondary);
+}
+
+
 
 /* File list */
 
@@ -324,6 +380,42 @@ body {
   color: var(--accent-primary);
 }
 
+.asset-item {
+  border-radius: 6px;
+  padding: 4px 4px;
+  cursor: pointer;
+}
+
+.asset-item.active {
+  background: var(--accent-soft);
+}
+
+.files-assets {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0; /* so the list can shrink/scroll like panel-body-files */
+}
+
+.files-assets-header {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.files-assets-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin-top: 4px;
+}
+
+.files-assets-footer {
+  margin-top: 8px;
+}
+
 /* Editor textarea */
 
 .editor-textarea {
@@ -356,6 +448,8 @@ body {
   align-items: center;
   gap: 8px;
   color: var(--text-main);
+    flex-wrap: wrap;
+
 }
 
 .button {
@@ -483,11 +577,12 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: radial-gradient(circle at top, #0b1120 0, #020617 55%, #000 100%);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-soft);
 }
 
 .login-card {
-  width: 360px;
+  width: 540px;
   border-radius: var(--radius-lg);
   border: 1px solid var(--panel-border);
   background: var(--bg-main);
@@ -501,6 +596,7 @@ body {
 .login-card h1 {
   font-size: 18px;
   margin: 0;
+  color: var(--text-main);
 }
 
 .login-card p {
@@ -516,11 +612,15 @@ body {
   margin-top: 10px;
 }
 
+.login-card form input {
+  background: var(--bg-main);
+}
+
 .login-card input[type='email'] {
   border-radius: 999px;
   border: 1px solid var(--panel-border);
-  background: var(--code-bg);
-  color: var(--code-text);
+  background: var(--bg-main);
+  color: var(--text-main);
   padding: 8px 10px;
   font-size: 13px;
   outline: none;
@@ -532,7 +632,7 @@ body {
 
 .login-status {
   font-size: 11px;
-  color: var(--text-muted);
+  color: var(--text-light);
   min-height: 14px;
 }
 
@@ -550,6 +650,7 @@ body {
   min-height: 0;
   overflow-y: auto;
 }
+
 
 /* Utility to make buttons span the panel width */
 .button.full-width {
@@ -588,6 +689,18 @@ body {
   color: #f97373;
 }
 
+.asset-preview-btn {
+  border: none;
+  background: transparent;
+  color: var(--accent-secondary);
+  font-size: 10px;
+  padding: 0 4px;
+  cursor: pointer;
+}
+
+.asset-preview-btn:hover {
+  color: var(--accent-primary);
+}
 .preview-modal-backdrop {
   position: fixed;
   inset: 0;
@@ -600,23 +713,52 @@ body {
 
 .preview-modal {
   width: min(960px, 90vw);
-  height: min(540px, 80vh);
-  background: var(white);
-    border-radius: 12px;
+  max-height: 90vh;          /* 🔁 was fixed height: min(540px, 80vh) */
+  height: auto;              /* let content drive height, up to 90vh */
+  background: white;
+  border-radius: 12px;
   border: 1px solid var(--panel-border);
   box-shadow: 0 30px 80px rgba(15, 23, 42, 0.9);
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: hidden;          /* header + body stay inside rounded corners */
 }
 
 .preview-modal-header {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 8px 12px;
   border-bottom: 1px solid var(--panel-border);
 }
+
+.preview-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-main);
+  overflow: hidden;
+}
+
+
+.preview-modal-media {
+  /* Fit width inside the modal */
+  max-width: 100%;
+  width: auto;
+
+  /* 🔑 Fit height inside the viewport (not just the body),
+     so tall/portrait images always fully show */
+  max-height: 80vh;
+  height: auto;
+
+  object-fit: contain;
+  display: block;
+}
+
 
 .preview-modal-title {
   font-size: 13px;
@@ -642,17 +784,21 @@ body {
   color: var(--text-main);
 }
 
-.preview-modal-body {
-  flex: 1;
-  padding: 0;
+/* iFrame preview variant: let iframe fill the body */
+.preview-modal-body--iframe {
+  align-items: stretch;
+  justify-content: stretch;
 }
 
-.preview-modal-body iframe {
+.preview-modal-iframe {
   width: 100%;
   height: 100%;
   border: none;
   background: transparent;
+  display: block;
+  min-height: min(720px, 70vh);
 }
+
 
 .app-header-user {
   position: relative;
@@ -666,8 +812,8 @@ body {
   align-items: center;
   gap: 6px;
   border: none;
-  background: transparent; /* badge-pill already provides bg */
-  padding: 0;              /* badge-pill class handles padding */
+  background: transparent;
+  padding: 0;
 }
 
 .badge-pill--clickable:focus-visible {
@@ -709,6 +855,69 @@ body {
   background: var(--accent-secondary);
 }
 
+.theme-select {
+  border-radius: 999px;
+  border: 1px solid var(--panel-border);
+  background: var(--bg-main);
+  color: var(--text-main);
+  font-size: 11px;
+  padding: 3px 8px;
+  outline: none;
+}
+
+.theme-select:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+/* Theme: default
+   (no overrides needed; uses :root vars)
+*/
+
+/* Theme: Midnight – darker code / panel look */
+.panel.theme-midnight {
+  --bg-main: #020617;
+  --code-bg: #020617;
+  --code-text: #e5e7eb;
+  --text-main: #e5e7eb;
+  --text-muted: #9ca3af;
+  --panel-border: #1f2937;
+}
+
+/* Theme: Paper – light editor with soft code bg */
+.panel.theme-paper {
+  --bg-main: #ffffff;
+  --code-bg: #f9fafb;
+  --code-text: #020617;
+  --text-main: #020617;
+  --text-muted: #6b7280;
+  --panel-border: #cbd5e1;
+}
+
+/* Theme: Ocean – deep blue / teal vibes */
+.panel.theme-ocean {
+  --bg-main: #021b2e;
+  --code-bg: #020817;
+  --code-text: #e0f2fe;
+  --text-main: #e0f2fe;
+  --text-muted: #7dd3fc;
+  --panel-border: #0ea5e9;
+  --accent-primary: #22d3ee;
+  --accent-secondary: #38bdf8;
+}
+
+/* Theme: Flower – soft pink / violet */
+.panel.theme-flower {
+  --bg-main: #fff7fb;
+  --code-bg: #fdf2ff;
+  --code-text: #4a044e;
+  --text-main: #4a044e;
+  --text-muted: #a855f7;
+  --panel-border: #f9a8d4;
+  --accent-primary: #ec4899;
+  --accent-secondary: #a855f7;
+}
+
 /* Responsive: stack vertically on narrower viewports */
 @media (max-width: 1024px) {
   .editor-shell {
@@ -722,4 +931,19 @@ body {
     flex: 0 0 auto;
     width: 100%;
   }
+}
+
+@media (max-width: 640px) {
+  .app-header {
+    align-items: flex-start;
+  }
+
+  .badge-pill {
+    font-size: 10px;
+    padding: 3px 8px;
+  }
+
+  .sidebar-section code {
+  max-width: 100%;
+}
 }
