@@ -166,7 +166,9 @@ function todayIsoDate() {
   return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
 }
 
-async function checkAndIncrementUserGptUsage(userId, amount = 1) {
+async function checkAndIncrementUserGptUsage(userId, amount = 1, opts = {}) {
+  const commit = opts.commit !== false; // default true
+
   const users = await loadUsersMeta();
   const idx = users.findIndex((u) => u.id === userId);
   if (idx === -1) {
@@ -187,10 +189,17 @@ async function checkAndIncrementUserGptUsage(userId, amount = 1) {
     usage.calls = 0;
   }
 
+  // Check limit BEFORE increment
   if (usage.calls + amount > GPT_MAX_CALLS_PER_DAY) {
     return { ok: false, usage };
   }
 
+  // If we're just checking, don't persist anything
+  if (!commit) {
+    return { ok: true, usage };
+  }
+
+  // Commit increment
   usage.calls += amount;
   users[idx] = {
     ...user,
@@ -409,6 +418,7 @@ function portalsEmbedHeaders(req, res, next) {
 
   // Important: CSP is per-response. This is the modern replacement for XFO.
   res.setHeader('Content-Security-Policy', `frame-ancestors ${frameAncestors};`);
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-site');
 
   next();
 }
@@ -1334,9 +1344,115 @@ app.post('/api/spaces/:slug/file/rename', requireUser, requireEditorOrigin, asyn
   }
 });
 
+// Official Portals SDK source (production)
+const PORTALS_SDK_SOURCE_PATH =
+  process.env.PORTALS_SDK_SOURCE_PATH ||
+  path.join(ROOT_DIR, 'sdk', 'portals-sdk.js');
+
+let portalsSdkSourceCache = { text: '', mtimeMs: 0 };
+
+async function loadPortalsSdkSource() {
+  try {
+    const stat = await fs.stat(PORTALS_SDK_SOURCE_PATH);
+
+    if (portalsSdkSourceCache.text && portalsSdkSourceCache.mtimeMs === stat.mtimeMs) {
+      return portalsSdkSourceCache.text;
+    }
+
+    const raw = await fs.readFile(PORTALS_SDK_SOURCE_PATH, 'utf8');
+    portalsSdkSourceCache = { text: raw, mtimeMs: stat.mtimeMs };
+
+    console.log('[gpt] loaded Portals SDK source (len:', raw.length, ')');
+    return raw;
+  } catch (err) {
+    console.warn('[gpt] could not load Portals SDK source:', err.message);
+    portalsSdkSourceCache = { text: '', mtimeMs: 0 };
+    return '';
+  }
+}
+
+function shouldIncludePortalsSdk({ prompt, fileText, messages }) {
+  const msgHay = [
+    prompt || '',
+    ...(Array.isArray(messages) ? messages.map((m) => m?.content || '') : []),
+  ].join('\n').toLowerCase();
+
+  const fileHay = (fileText || '').toLowerCase();
+
+  // "Strong" SDK / Unity integration identifiers
+  const strong = [
+    'portalssdk',          // matches "PortalsSdk" when lowercased
+    'uniwebview://',
+    'requestpublicid',
+    'requestpublickey',
+    'getinventorydata',
+    'getuserquests',
+    'startquest',
+    'getzones',
+    'claimzone',
+    'sessionset',
+    'sessionget',
+    'startspeechtotext',
+    'stopspeechtotext',
+    'starttexttospeech',
+    'texttospeech',
+    'closeiframe',
+    'openauthmodal',
+    'openbackpack',
+    'sendmessagetounity',
+    'setmessagelistener',
+    'oncloseiframemessage',
+  ];
+
+  // "Weak" integration words that are too common on their own
+  const weak = [
+    'postmessage',
+    'window.parent',
+    'parent.postmessage',
+    'targetorigin',
+    'messageevent',
+  ];
+
+  const env = ['portals', 'unity'];
+
+  const msgHasStrong = strong.some((t) => msgHay.includes(t));
+  const msgHasEnv = env.some((t) => msgHay.includes(t));
+  const msgHasWeak = weak.some((t) => msgHay.includes(t));
+
+  // File-only triggers must be explicit SDK fingerprints (NOT generic)
+  const fileHasSdkFingerprint =
+    fileHay.includes('portalssdk') ||
+    fileHay.includes('uniwebview://') ||
+    fileHay.includes('portalsSdk'.toLowerCase()); // redundant but clear
+
+  // Include SDK if:
+  // - user/messages mention strong SDK terms, OR
+  // - file clearly uses SDK, OR
+  // - user mentions Portals/Unity AND integration mechanics (postMessage etc.)
+  return msgHasStrong || fileHasSdkFingerprint || (msgHasEnv && msgHasWeak);
+}
+
+
+const PORTALS_SDK_PROD_CHEATSHEET = [
+  'You are using the official Portals SDK (global object: PortalsSdk). This tool is ONLY for the Portals production environment.',
+  'When a method requires originUrl, use: PortalsSdk.Origin.Prod',
+  '',
+  'Important SDK behavior:',
+  '- Many SDK methods set: PortalsSdk.PortalsWindow.onmessage = PortalsSdk.OnMessage (overwrites onmessage).',
+  '- Do NOT recommend overriding window.onmessage in user code. Prefer SDK callbacks + PortalsSdk.setMessageListener(cb) when appropriate.',
+  '- Set the callback BEFORE calling the SDK method; OnMessage may invoke callbacks immediately.',
+  '',
+  'Common calls:',
+  '- PortalsSdk.requestPublicKey(PortalsSdk.Origin.Prod, cb)',
+  '- PortalsSdk.requestPublicId(PortalsSdk.Origin.Prod, cb)',
+  '- PortalsSdk.getInventoryData(PortalsSdk.Origin.Prod, itemGeneratorKeys, itemGeneratorIds, cb, extraItems?)',
+  '- PortalsSdk.sessionSet(key, value) / PortalsSdk.sessionGet(key, cb)',
+  '- PortalsSdk.startSpeechToText(prompt, liveTranscription, speechTime, onTranscript, onVolume)',
+  '- PortalsSdk.startTextToSpeech(text, story?, passage?)',
+  '- PortalsSdk.closeIframe(), PortalsSdk.openAuthModal(), PortalsSdk.openBackpack()',
+].join('\n');
 
 // ───────────────── GPT helper for a user space ─────────────────
-
 // POST /api/spaces/:slug/gpt/chat
 // body: {
 //   prompt: string,
@@ -1360,7 +1476,7 @@ app.post(
 
       await ensureSpacesRoot();
       const { slug } = req.params;
-      const { prompt, filePath, model: requestedModel, messages } = req.body || {};
+      const { prompt, filePath, fileContent, model: requestedModel, messages } = req.body || {};
 
       if (!isValidSlug(slug)) {
         return res.status(400).json({ error: 'bad_slug' });
@@ -1375,7 +1491,8 @@ app.post(
       }
 
       // Per-user daily GPT quota
-      const quotaCheck = await checkAndIncrementUserGptUsage(req.user.id, 1);
+      // Per-user daily GPT quota (PRECHECK only — don't burn quota on OpenAI failure)
+      const quotaCheck = await checkAndIncrementUserGptUsage(req.user.id, 1, { commit: false });
       if (!quotaCheck.ok) {
         return res.status(429).json({
           error: 'gpt_quota_exceeded',
@@ -1386,42 +1503,83 @@ app.post(
 
       const model = pickModel(requestedModel);
 
-      // Optional: load current file content for context
-      let fileContext = null;
-      let fileLang = 'text';
-      if (filePath) {
-        try {
-          const fullPath = resolveSpacePath(space, filePath);
-          if (isEditableTextFile(fullPath)) {
-            const content = await fs.readFile(fullPath, 'utf8');
-            const MAX_FILE_CHARS = 20000;
-            const snippet =
-              content.length > MAX_FILE_CHARS
-                ? content.slice(0, MAX_FILE_CHARS) + '\n<!-- [truncated for GPT] -->'
-                : content;
 
-            const ext = (path.extname(filePath) || '').toLowerCase();
-            if (ext === '.html' || ext === '.htm') fileLang = 'html';
-            else if (ext === '.css') fileLang = 'css';
-            else if (ext === '.js' || ext === '.mjs') fileLang = 'javascript';
-            else if (ext === '.json') fileLang = 'json';
+let fileContext = null;
+let fileLang = 'text';
 
-            fileContext = { path: filePath, snippet, lang: fileLang };
-          }
-        } catch (err) {
-          console.warn('[gpt] failed to load file context', filePath, err.message);
-        }
+if (filePath) {
+  try {
+    let content = null;
+
+    if (typeof fileContent === 'string' && fileContent.length) {
+      content = fileContent;
+    } else {
+      const fullPath = resolveSpacePath(space, filePath);
+      if (isEditableTextFile(fullPath)) {
+        content = await fs.readFile(fullPath, 'utf8');
+      }
+    }
+
+    if (typeof content === 'string') {
+      const ext = (path.extname(filePath) || '').toLowerCase();
+      if (ext === '.html' || ext === '.htm') fileLang = 'html';
+      else if (ext === '.css') fileLang = 'css';
+      else if (ext === '.js' || ext === '.mjs') fileLang = 'javascript';
+      else if (ext === '.json') fileLang = 'json';
+
+      const MAX_FILE_CHARS = 20_000;
+      const isTruncated = content.length > MAX_FILE_CHARS;
+
+      // Show head+tail when truncated (better than only head)
+      const HEAD_CHARS = 12_000;
+      const TAIL_CHARS = MAX_FILE_CHARS - HEAD_CHARS; // keeps total <= MAX_FILE_CHARS
+
+      let snippet = content;
+      let headChars = content.length;
+      let tailChars = 0;
+
+      if (isTruncated) {
+        const head = content.slice(0, HEAD_CHARS);
+        const tail = content.slice(Math.max(0, content.length - TAIL_CHARS));
+        snippet = head + '\n' + tail;
+
+        headChars = HEAD_CHARS;
+        tailChars = TAIL_CHARS;
       }
 
-      // Decide if we should include the Portals SDK notes markdown
-      const lowerPrompt = (prompt || '').toLowerCase();
-      const wantsPortalsDocs =
-        lowerPrompt.includes('portals') ||
-        lowerPrompt.includes('unity') ||
-        lowerPrompt.includes('portalssdk') ||
-        lowerPrompt.includes('postmessage');
+      fileContext = {
+        path: filePath,
+        snippet,
+        lang: fileLang,
+        truncated: isTruncated,
+        totalChars: content.length,
+        headChars,
+        tailChars,
+      };
+    }
+  } catch (err) {
+    console.warn('[gpt] failed to load file context', filePath, err.message);
+  }
+}
 
-      const portalsDocs = wantsPortalsDocs ? await getPortalsMarkdown() : '';
+
+const includeSdk = shouldIncludePortalsSdk({
+  prompt,
+  fileText: fileContext?.snippet || '',
+  messages,
+});
+const portalsSdkContext = [
+  'Context:',
+  '- The overlay runs inside an <iframe> embedded in the Portals Unity environment.',
+  '- A global PortalsSdk object exists in the iframe (official production SDK).',
+  '- This tool targets production only. When an SDK method requires originUrl, use PortalsSdk.Origin.Prod.',
+  '- Avoid setting window.onmessage directly; the SDK overwrites PortalsSdk.PortalsWindow.onmessage in many methods.',
+  '- Prefer the SDK callback pattern (e.g. requestPublicId(originUrl, cb), sessionGet(key, cb)).',
+].join('\n');
+
+// Optional (small) markdown hints, only when the question looks Portals/Unity-related
+const portalsDocs = includeSdk ? await getPortalsMarkdown() : '';
+
 
       // Build messages for the chat completion
       const chatMessages = [];
@@ -1435,30 +1593,42 @@ chatMessages.push({
     'Prefer small, focused changes and clearly labeled code blocks.',
     'Always format your response as Markdown.',
     'Wrap code in fenced blocks with a correct language tag (```html, ```css, ```js, ```json, etc.) so that a Markdown renderer can pretty-print it.',
-    'When modifying a file, either provide the full updated file OR clear, copy-pastable snippets.',
+'If a current file is provided: your FIRST fenced code block must be the FULL updated file content. Output exactly one code block for the file.'
   ].join(' '),
 });
 
+if (includeSdk) {
+  chatMessages.push({
+    role: 'system',
+    content: PORTALS_SDK_PROD_CHEATSHEET,
+  });
 
-      // Portals SDK context
-      const portalsSdkContext = [
-        'The overlays you help with run inside an <iframe> that is embedded in the Portals Unity environment.',
-        'A Portals SDK script has already been loaded into the page, exposing a global "PortalsSdk" object.',
-        'The SDK source is publicly hosted at https://portals-labs.github.io/portals-sdk/portals-sdk.js and defines helpers like PortalsSdk.PortalsWindow, PortalsSdk.PortalsParent, and PortalsSdk.Origin (mapping common environment base URLs).',
-        'In general, the integration pattern is:',
-        '- The iframe window is available as PortalsSdk.PortalsWindow (usually just window).',
-        '- The parent Portals/Unity container is available as PortalsSdk.PortalsParent (usually window.parent).',
-        '- PortalsSdk.Origin provides well-known environment origins (Localhost, Dev, Prev, Prod, etc.), which can be used for origin checks in postMessage handlers.',
-        'When you need to communicate between the iframe HUD and the Portals/Unity parent:',
-        '- Use window.addEventListener("message", handler) in the iframe to receive messages.',
-        '- Use window.parent.postMessage(...) or PortalsSdk.PortalsParent.postMessage(...) to send messages back to the Portals/Unity environment.',
-        'All code you generate must remain client-side and iframe-safe. Do not invent new server endpoints or assume the SDK can make HTTP requests for you.',
-        'If you suggest message formats (e.g. { type: "HUD_UPDATE", payload: {...} }), clearly mark them as conventions the user can adapt to their own Portals/Unity setup.',
-        'When users ask about Portals integration issues (e.g. HUD not updating, messages not received), reason about:',
-        '- postMessage origins and targetOrigin filters,',
-        '- correct wiring of PortalsSdk.PortalsParent and PortalsSdk.PortalsWindow,',
-        '- and message types / payload shapes between Unity and the iframe.'
-      ].join(' ');
+  const sdkSource = await loadPortalsSdkSource();
+  if (sdkSource) {
+    const MAX_SDK_CHARS = 80_000; // usually plenty; adjust if needed
+    const sdkText =
+      sdkSource.length > MAX_SDK_CHARS
+        ? sdkSource.slice(0, MAX_SDK_CHARS) + '\n/* [truncated for prompt size] */\n'
+        : sdkSource;
+
+    chatMessages.push({
+      role: 'system',
+      content:
+        'Below is the official Portals SDK source (production). Treat it as the source of truth. ' +
+        'Do not invent SDK methods/properties that are not present here.\n\n' +
+        '```js\n' +
+        sdkText +
+        '\n```',
+    });
+  } else {
+    chatMessages.push({
+      role: 'system',
+      content:
+        'PortalsSdk source was expected at sdk/portals-sdk.js but was not found on the server. ' +
+        'If you are unsure about an SDK API name, say so and propose a safe postMessage-based fallback.',
+    });
+  }
+}
 
       chatMessages.push({
         role: 'system',
@@ -1477,12 +1647,21 @@ chatMessages.push({
       }
 
       // File context, if we have one
-      if (fileContext) {
-        chatMessages.push({
-          role: 'system',
-          content: `Here is the current file ${fileContext.path}. Respond with updated code that fits this structure.\n\n\`\`\`${fileContext.lang}\n${fileContext.snippet}\n\`\`\``,
-        });
-      }
+if (fileContext) {
+  const truncNote = fileContext.truncated
+    ? `NOTE: The file was truncated for GPT context (showing first ${fileContext.headChars} chars + last ${fileContext.tailChars} chars of ${fileContext.totalChars}). ` +
+      `DO NOT output a full-file replacement. Output only targeted, copy-pastable snippets and say exactly where they go.`
+    : '';
+
+  chatMessages.push({
+    role: 'system',
+    content:
+      `${truncNote}\n\n` +
+      `Here is the current file ${fileContext.path}:\n\n` +
+      `\`\`\`${fileContext.lang}\n${fileContext.snippet}\n\`\`\``,
+  });
+}
+
 
       // Include any prior chat history the frontend wants to send
       if (Array.isArray(messages)) {
@@ -1491,7 +1670,7 @@ chatMessages.push({
             m &&
             typeof m.role === 'string' &&
             typeof m.content === 'string' &&
-            ['user', 'assistant', 'system'].includes(m.role)
+            ['user', 'assistant'].includes(m.role)
           ) {
             chatMessages.push({ role: m.role, content: m.content });
           }
@@ -1510,19 +1689,31 @@ chatMessages.push({
         temperature: 0.3,
       });
 
+      // Commit quota ONLY after OpenAI succeeds
+      // (If this write fails, log it, but don't destroy UX by failing the response.)
+      try {
+        await checkAndIncrementUserGptUsage(req.user.id, 1, { commit: true });
+      } catch (e) {
+        console.error('[gpt] quota commit failed (non-fatal)', e);
+      }
+
       const answer = completion.choices[0]?.message || { role: 'assistant', content: '' };
 
       res.json({
         ok: true,
         model,
+        sdkIncluded: includeSdk,
+        fileContextTruncated: !!fileContext?.truncated,
         message: answer,
       });
+
     } catch (err) {
       console.error('[gpt] error in /api/spaces/:slug/gpt/chat', err);
       next(err);
     }
   }
 );
+// ───────────────── GPT helper for a user space ─────────────────
 
 
 // ───────────────── Asset upload for a user space ─────────────────

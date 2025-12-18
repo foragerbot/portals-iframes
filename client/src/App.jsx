@@ -668,6 +668,7 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
   const [gptPrompt, setGptPrompt] = useState('');
   const [gptResponse, setGptResponse] = useState('');
   const [gptBusy, setGptBusy] = useState(false);
+  const [gptHistory, setGptHistory] = useState([]);
 
   const [creatingFile, setCreatingFile] = useState(false);
   const [deletingFile, setDeletingFile] = useState(false);
@@ -678,8 +679,6 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
 
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewReloadKey, setPreviewReloadKey] = useState(0);
-
-  const editorRef = useRef(null);
 
   // 🔹 independent themes
   const [editorTheme, setEditorTheme] = useState(() => {
@@ -715,6 +714,15 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
       setFilesLoading(false);
     }
   }, [slug]);
+
+const onReplaceWithGpt = () => {
+  if (!gptResponse || !selectedPath) return;
+  const code = extractBestCodeBlock(gptResponse, selectedPath);
+  if (!code) return;
+
+  setFileContent(code);
+  setHasUnsavedChanges(true);
+};
 
   const loadFile = useCallback(
     async (path) => {
@@ -915,22 +923,34 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
     if (!gptPrompt.trim()) return;
     setGptBusy(true);
     setGptResponse('');
+
+    const historyToSend = gptHistory.slice(-10);
+
     try {
       const data = await callSpaceGpt(slug, {
         prompt: gptPrompt,
         filePath: selectedPath || undefined,
+        fileContent: fileContent || '',
+        messages: historyToSend,
       });
-      setGptResponse(data.message?.content || '');
-      if (onUsageRefresh) {
-        onUsageRefresh();
-      }
-    } catch (err) {
-      console.error(err);
-      setGptResponse(err.payload?.message || 'GPT request failed.');
-    } finally {
-      setGptBusy(false);
-    }
-  };
+
+      const content = data.message?.content || '';
+      setGptResponse(content);
+      
+    setGptHistory((prev) => [
+      ...prev,
+      { role: 'user', content: gptPrompt },
+      { role: 'assistant', content },
+    ]);
+        onUsageRefresh?.();
+  } catch (err) {
+    console.error(err);
+    setGptResponse(err.payload?.message || 'GPT request failed.');
+  } finally {
+    setGptBusy(false);
+  }
+};
+
 
     const handleGptKeyDown = (e) => {
     if (e.key === 'Enter') {
@@ -945,17 +965,6 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
         onRunGpt();
       }
     }
-  };
-
-  // Extract the first fenced code block from GPT markdown, if any
-  const extractFirstCodeBlock = (markdown) => {
-    if (!markdown) return null;
-    const fenceRegex = /```[^\n]*\n([\s\S]*?)```/;
-    const match = markdown.match(fenceRegex);
-    if (match && match[1]) {
-      return match[1].trimEnd() + '\n';
-    }
-    return null;
   };
 
   const onCopyGptText = async () => {
@@ -998,40 +1007,6 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
   }
 };
 
-  const onInsertGptCode = () => {
-    if (!gptResponse || !selectedPath) return;
-
-    const code = extractFirstCodeBlock(gptResponse) || gptResponse;
-    const textarea = editorRef.current;
-
-    if (!textarea) {
-      setFileContent((prev) => (prev || '') + '\n' + code);
-      setHasUnsavedChanges(true);
-      return;
-    }
-
-    const current = fileContent || '';
-    const start = textarea.selectionStart ?? current.length;
-    const end = textarea.selectionEnd ?? start;
-
-    const before = current.slice(0, start);
-    const after = current.slice(end);
-
-    const nextContent = before + code + after;
-
-    setFileContent(nextContent);
-    setHasUnsavedChanges(true);
-
-    const cursorPos = before.length + code.length;
-    requestAnimationFrame(() => {
-      try {
-        textarea.focus();
-        textarea.setSelectionRange(cursorPos, cursorPos);
-      } catch {
-        // ignore
-      }
-    });
-  };
 
   const onCopyIframeUrl = async () => {
     if (!selectedPath) return;
@@ -1238,7 +1213,6 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
               ) : (
                 <>
                   <textarea
-                    ref={editorRef}
                     className="editor-textarea"
                     value={fileContent}
                     onChange={(e) => {
@@ -1420,11 +1394,11 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
                     <button
                       className="button small"
                       type="button"
-                      onClick={onInsertGptCode}
+                      onClick={onReplaceWithGpt}
                       disabled={!gptResponse || !selectedPath}
                     >
-                      Insert into editor
-                    </button>
+                    Replace file
+                  </button>
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                     Uses your daily GPT quota.
