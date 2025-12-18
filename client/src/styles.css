@@ -1,40 +1,65 @@
+/* ────────────────────────────────────────────
+   Global tokens
+   ──────────────────────────────────────────── */
+
 :root {
+  /* surfaces */
   --bg-main: #f1eded;
   --bg-elevated: #32343b;
   --panel-border: #1f2937;
   --panel-soft: #b9bdcb;
 
+  /* accents */
   --accent-primary: #22d3ee;
   --accent-secondary: #a855f7;
   --accent-soft: rgba(34, 211, 238, 0.12);
 
+  /* shadows */
+  --shadow-dark: rgba(15, 23, 42, 0.9);
+
+  /* text */
   --text-main: #000000;
   --text-muted: #6c7589;
   --text-light: #e2e2e2;
 
-  --button-main: #000000; /* text color on buttons */
-  --button-alt:  #abd4ec; /* default button background */
-
+  /* buttons */
+  --button-main: #000000;      /* button text */
+  --button-alt: #abd4ec;       /* default button background */
   --button-primary: linear-gradient(
     to right,
     rgba(34, 211, 238, 0.12),
     rgba(168, 85, 247, 0.16)
   );
 
+  /* code areas */
   --code-bg: #000000;
   --code-text: #ffffff;
 
+  /* highlight.js token colors (can be overridden by themes) */
+  --hljs-keyword: #fb7185;
+  --hljs-string: #22c55e;
+  --hljs-number: #f97316;
+  --hljs-comment: #6b7280;
+  --hljs-function: #38bdf8;
+  --hljs-variable: #eab308;
+
+  /* status */
   --danger: #f97373;
   --ok: #0c4dcd;
 
+  /* radii */
   --radius-md: 10px;
   --radius-lg: 14px;
 
+  /* effects */
   --shadow-soft: 0 0 20px rgba(34, 211, 238, 0.2);
 
   --font-main: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  
 }
+
+/* ────────────────────────────────────────────
+   Resets / base
+   ──────────────────────────────────────────── */
 
 *,
 *::before,
@@ -52,12 +77,14 @@ body,
 }
 
 body {
-  background: var(  --bg-main);
-    color: var(--text-main);
+  background: var(--bg-main);
+  color: var(--text-main);
   font-family: var(--font-main);
 }
 
-/* Layout */
+/* ────────────────────────────────────────────
+   App shell & header
+   ──────────────────────────────────────────── */
 
 .app-shell {
   height: 100vh;
@@ -67,8 +94,6 @@ body {
 
 .app-header {
   min-height: 50px;
-  height: auto;
-
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -76,7 +101,6 @@ body {
   border-bottom: 1px solid var(--panel-border);
   background: var(--bg-elevated);
   backdrop-filter: blur(12px);
-
   gap: 8px;
   flex-wrap: wrap;
 }
@@ -86,7 +110,7 @@ body {
   align-items: baseline;
   gap: 10px;
   flex: 1 1 auto;
-  min-width: 0; /* prevents weird shrinking */
+  min-width: 0;
 }
 
 .app-header-title h1 {
@@ -134,12 +158,14 @@ body {
   min-height: 0;
 }
 
-/* Sidebar */
+/* ────────────────────────────────────────────
+   Sidebar
+   ──────────────────────────────────────────── */
 
 .app-sidebar {
   width: 260px;
   border-right: 1px solid var(--panel-border);
-  background: var(  --bg-main);
+  background: var(--bg-main);
   padding: 14px 12px;
   display: flex;
   flex-direction: column;
@@ -149,9 +175,9 @@ body {
 .sidebar-section {
   border-radius: var(--radius-md);
   border: 1px solid var(--panel-border);
-  background: var(  --bg-main);
+  background: var(--bg-main);
   padding: 10px;
-  height:100%;
+  height: 100%;
 }
 
 .sidebar-section h2 {
@@ -177,7 +203,7 @@ body {
   border-radius: 8px;
   padding: 7px 9px;
   border: 1px solid transparent;
-  background: (15, 23, 42, 0.7);
+  background: var(--button-alt);
   cursor: pointer;
   display: flex;
   flex-direction: column;
@@ -185,7 +211,7 @@ body {
 }
 
 .space-item.active {
-  border-color: rgba(34, 211, 238, 0.8);
+  border-color: var(--panel-border);
   box-shadow: var(--shadow-soft);
 }
 
@@ -198,7 +224,9 @@ body {
   color: var(--text-main);
 }
 
-/* Main editor area */
+/* ────────────────────────────────────────────
+   Main editor layout
+   ──────────────────────────────────────────── */
 
 .app-content {
   flex: 1;
@@ -207,8 +235,7 @@ body {
   min-height: 0;
 }
 
-/* Editor layout: left file list + center editor + right GPT */
-
+/* Editor layout: left Files + center Editor + right GPT */
 .editor-shell {
   display: flex;
   gap: 10px;
@@ -218,19 +245,21 @@ body {
   box-sizing: border-box;
 }
 
-/* If only one panel is visible AND it's not the Files panel, let it fill the space */
+/* If only one non-files panel is visible, let it fill */
 .editor-shell > .panel:not(.panel--files):only-child {
   flex: 1 1 auto;
   min-width: 0;
 }
 
-/* Panels */
+/* ────────────────────────────────────────────
+   Panels (generic)
+   ──────────────────────────────────────────── */
 
 .panel {
   border-radius: var(--radius-lg);
   border: 1px solid var(--panel-border);
-  background: var(  --bg-main);
-    padding: 10px;
+  background: var(--bg-main);
+  padding: 10px;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -260,9 +289,15 @@ body {
   color: var(--text-muted);
 }
 
+.panel-header-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .panel-toggle {
   border: none;
-  background: var(  --bg-main);
+  background: var(--bg-main);
   border-radius: 999px;
   border: 1px solid var(--accent-secondary);
   color: var(--text-main);
@@ -279,64 +314,45 @@ body {
   color: var(--panel-border);
 }
 
-.panel-toggle span {
-  font-size: 14px;
-}
+/* Role-specific panels */
 
-
-/* Panels with roles */
 .panel--files {
   flex: 0 0 250px;
   min-width: 220px;
-  height:100%;
+  height: 100%;
 }
 
 .panel--editor {
   flex: 1 1 auto;
-  min-width: 0; /* allow textarea to shrink */
+  min-width: 0;
+  /* panel-scoped font-size vars */
+  --editor-font-size: 12px;
+  --editor-code-font-size: 12px;
 }
 
 .panel--gpt {
   flex: 0 0 32%;
   min-width: 300px;
+  --gpt-font-size: 12px;
+  --gpt-code-font-size: 11px;
 }
 
-/* When editor is hidden, let GPT panel act as the main content column */
+/* When editor is hidden, GPT fills */
 .panel--gpt-full {
   flex: 1 1 auto;
   min-width: 0;
 }
 
-/* When GPT is the only main panel, let it fill */
-.panel--gpt-full {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-/* When Editor + GPT are both visible, split remaining space 50/50 */
+/* When editor + GPT both visible, split */
 .panel--editor-half,
 .panel--gpt-half {
   flex: 1 1 0;
   min-width: 0;
 }
 
-.panel-header-right {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-/* Editor panel font-size tokens */
-.panel--editor {
-  --editor-font-size: 12px;
-  --editor-code-font-size: 12px;
-}
-
-/* GPT panel font-size tokens */
-.panel--gpt {
-  --gpt-font-size: 12px;
-  --gpt-code-font-size: 11px;
-}
+/* ────────────────────────────────────────────
+   Files / Assets
+   ──────────────────────────────────────────── */
 
 .files-toggle {
   display: inline-flex;
@@ -366,8 +382,6 @@ body {
   color: var(--accent-secondary);
 }
 
-
-
 /* File list */
 
 .file-list {
@@ -377,6 +391,7 @@ body {
   flex: 1;
   overflow-y: auto;
 }
+
 .file-item {
   font-size: 12px;
   padding: 5px 6px;
@@ -414,6 +429,8 @@ body {
   color: var(--accent-primary);
 }
 
+/* Assets list */
+
 .asset-item {
   border-radius: 6px;
   padding: 4px 4px;
@@ -428,7 +445,7 @@ body {
   display: flex;
   flex-direction: column;
   flex: 1;
-  min-height: 0; /* so the list can shrink/scroll like panel-body-files */
+  min-height: 0;
 }
 
 .files-assets-header {
@@ -450,14 +467,48 @@ body {
   margin-top: 8px;
 }
 
-/* Editor textarea */
+/* Assets buttons */
+
+.asset-copy-btn,
+.asset-delete-btn,
+.asset-preview-btn {
+  border: none;
+  background: transparent;
+  color: var(--accent-secondary);
+  font-size: 10px;
+  padding: 0 4px;
+  cursor: pointer;
+}
+
+.asset-copy-btn:hover {
+  color: #22d3ee;
+}
+
+.asset-delete-btn:hover {
+  color: #f97373;
+}
+
+.asset-preview-btn:hover {
+  color: var(--accent-primary);
+}
+
+/* Panel body for files list so New File can sit at bottom */
+.panel-body-files {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* ────────────────────────────────────────────
+   Editor
+   ──────────────────────────────────────────── */
 
 .editor-textarea {
   flex: 1;
   width: 100%;
   resize: none;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
-    monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    'Liberation Mono', 'Courier New', monospace;
   font-size: var(--editor-code-font-size);
   line-height: 1.4;
   color: var(--text-main);
@@ -473,8 +524,6 @@ body {
   box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.5);
 }
 
-/* Editor actions */
-
 .editor-actions {
   margin-top: 8px;
   display: flex;
@@ -482,9 +531,10 @@ body {
   align-items: center;
   gap: 8px;
   color: var(--text-main);
-    flex-wrap: wrap;
-
+  flex-wrap: wrap;
 }
+
+/* Buttons */
 
 .button {
   border-radius: 999px;
@@ -508,13 +558,22 @@ body {
   color: var(--button-main);
 }
 
+.button.full-width {
+  width: 100%;
+  justify-content: center;
+}
+
 .button:disabled {
   opacity: 0.5;
   color: var(--text-muted);
   cursor: default;
 }
 
-/* GPT panel – chat-style transcript */
+/* ────────────────────────────────────────────
+   GPT Helper – transcript & input
+   ──────────────────────────────────────────── */
+
+/* Chat container */
 .gpt-messages {
   flex: 1;
   overflow-y: auto;
@@ -530,164 +589,7 @@ body {
   gap: 8px;
 }
 
-.gpt-code {
-  margin: 0;
-  padding: 6px 8px;
-  border-radius: 0 0 8px 8px;
-  background: var(--code-bg);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-    'Liberation Mono', 'Courier New', monospace;
-  white-space: pre;
-  overflow-x: auto;
-  font-size: var(--gpt-code-font-size);
-  color: var(--text-light);
-}
-/* Wrapper around a fenced code block */
-.gpt-code-block {
-  margin: 8px 0;
-  border-radius: 8px;
-  border: 1px solid var(--accent-primary);
-  background: rgba(0, 0, 0, 0.9);
-  overflow: hidden;
-}
-
-/* Paper theme: make GPT code blocks light like the editor */
-.panel.theme-paper .gpt-code-block {
-  background: #f9fafb;           /* light code bg */
-  border-color: #cbd5e1;         /* soft gray border */
-}
-
-.panel.theme-paper .gpt-code-header {
-  background: #e5e7eb;           /* light header bar */
-  border-bottom-color: #cbd5e1;
-}
-
-.panel.theme-paper .gpt-code {
-  background: #f9fafb;
-  color: #020617;                /* dark ink */
-}
-
-.panel.theme-paper .gpt-code-lang {
-  color: #6b7280;                /* muted gray label */
-}
-
-.panel.theme-paper .gpt-code-copy-btn {
-  background: #ffffff;
-  color: #111827;
-  border-color: #cbd5e1;
-}
-
-.panel.theme-paper .gpt-code-copy-btn:hover {
-  background: #e5e7eb;
-  border-color: #22d3ee;         /* little cyan pop on hover */
-}
-
-/* Flower theme: make GPT code blocks match the soft pink/violet look */
-.panel.theme-flower .gpt-code-block {
-  background: #fdf2ff;          /* light lilac code bg */
-  border-color: #f9a8d4;        /* soft pink border */
-}
-
-.panel.theme-flower .gpt-code-header {
-  background: #fce7f3;          /* slightly deeper pink header strip */
-  border-bottom-color: #f9a8d4;
-}
-
-.panel.theme-flower .gpt-code {
-  background: #fdf2ff;
-  color: #4a044e;               /* deep plum text */
-}
-
-.panel.theme-flower .gpt-code-lang {
-  color: #a855f7;               /* violet label */
-}
-
-.panel.theme-flower .gpt-code-copy-btn {
-  background: #fff7fb;          /* very light pink button */
-  color: #4a044e;
-  border-color: #f9a8d4;
-}
-
-.panel.theme-flower .gpt-code-copy-btn:hover {
-  background: #fce7f3;
-  border-color: #ec4899;        /* coral-pink accent on hover */
-}
-
-/* Header bar above the code block */
-.gpt-code-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 4px 8px;
-  font-size: 10px;
-  background: rgba(15, 23, 42, 0.9);
-  border-bottom: 1px solid rgba(148, 163, 184, 0.5);
-}
-
-.gpt-code-lang {
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-muted);
-}
-
-/* Copy button inside the code header */
-.gpt-code-copy-btn {
-  border-radius: 999px;
-  border: 1px solid var(--panel-border);
-  background: rgba(15, 23, 42, 0.9);
-  color: var(--text-light);
-  font-size: 10px;
-  padding: 2px 8px;
-  cursor: pointer;
-}
-
-.gpt-code-copy-btn:hover {
-  border-color: var(--accent-primary);
-  background: rgba(34, 211, 238, 0.24);
-}
-
-/* Inline code styling inside GPT messages */
-.gpt-inline-code {
-  display: inline-block;
-  padding: 0 3px;
-  border-radius: 4px;
-  background: rgba(15, 23, 42, 0.9);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-    'Liberation Mono', 'Courier New', monospace;
-  font-size: 11px;
-}
-
-
-.gpt-input {
-  margin-top: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.gpt-input textarea {
-  width: 100%;
-  min-height: 60px;
-  max-height: 120px;
-  resize: vertical;
-  border-radius: 8px;
-  border: 1px solid var(--panel-border);
-  background: var(--bg-main);
-  color: var(--text-main);
-  font-size: 12px;
-  padding: 6px 8px;
-  outline: none;
-}
-
-.gpt-input textarea:focus {
-  border-color: var(--accent-primary);
-}
-
-.gpt-input textarea::placeholder {
- color:var(--text-main);
-}
-
-/* GPT chat messages */
+/* Chat messages */
 
 .gpt-message {
   display: flex;
@@ -699,7 +601,7 @@ body {
 }
 
 .gpt-message-avatar {
-  flex: 0 0 24px;       /* fixed avatar width */
+  flex: 0 0 24px;
   height: 24px;
   border-radius: 999px;
   display: flex;
@@ -712,12 +614,12 @@ body {
 }
 
 .gpt-message-bubble {
-  flex: 1 1 auto;       /* take remaining width */
-  min-width: 0;         /* allow shrinking instead of forcing overflow */
+  flex: 1 1 auto;
+  min-width: 0;
   max-width: 100%;
   padding: 6px 10px;
   border-radius: 10px;
-  background: rgba(15, 23, 42, 0.9);
+  background: var(--shadow-dark);
   border: 1px solid var(--panel-border);
 }
 
@@ -746,7 +648,8 @@ body {
   color: var(--text-light);
 }
 
-/* Metadata & content inside bubbles */
+/* Message internals */
+
 .gpt-message-meta {
   font-size: 10px;
   text-transform: uppercase;
@@ -760,25 +663,6 @@ body {
   color: var(--code-text);
 }
 
-/* Let markdown inside GPT bubbles inherit nicely */
-.gpt-message-content .gpt-markdown {
-  font-size: 12px;
-}
-
-.gpt-message-content .gpt-markdown p {
-  margin: 0 0 6px;
-}
-
-.gpt-message-content .gpt-markdown code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-    'Liberation Mono', 'Courier New', monospace;
-}
-
-.gpt-input textarea:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
 .gpt-message,
 .gpt-message-bubble,
 .gpt-message-content,
@@ -786,8 +670,171 @@ body {
   max-width: 100%;
 }
 
+/* Markdown inside messages */
 
-/* Usage chip */
+.gpt-markdown {
+  font-size: 12px;
+}
+
+.gpt-markdown p {
+  margin: 0 0 6px;
+}
+
+.gpt-markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    'Liberation Mono', 'Courier New', monospace;
+}
+
+/* GPT input area */
+
+.gpt-input {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gpt-input textarea {
+  width: 100%;
+  min-height: 60px;
+  max-height: 120px;
+  resize: vertical;
+  border-radius: 8px;
+  border: 1px solid var(--panel-border);
+  background: var(--bg-main);
+  color: var(--text-main);
+  font-size: 12px;
+  padding: 6px 8px;
+  outline: none;
+}
+
+.gpt-input textarea:focus {
+  border-color: var(--accent-primary);
+}
+
+.gpt-input textarea::placeholder {
+  color: var(--text-main);
+}
+
+.gpt-input textarea:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* ────────────────────────────────────────────
+   GPT Helper – code blocks + highlight.js
+   ──────────────────────────────────────────── */
+
+/* Block code content */
+.gpt-code {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 0 0 8px 8px;
+  background: var(--code-bg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    'Liberation Mono', 'Courier New', monospace;
+  white-space: pre;
+  overflow-x: auto;
+  overflow-y: hidden;
+  font-size: var(--gpt-code-font-size);
+  color: var(--text-light);
+}
+
+/* Wrapper around a fenced code block */
+.gpt-code-block {
+  margin: 8px 0;
+  border-radius: 8px;
+  border: 1px solid var(--accent-primary);
+  background: rgba(0, 0, 0, 0.9);
+  overflow: hidden;
+  max-width: 100%;
+}
+
+/* Code block header (lang + Copy button) */
+.gpt-code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  font-size: 10px;
+  background: var(--shadow-dark);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.5);
+}
+
+.gpt-code-lang {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+/* Copy button inside code header */
+.gpt-code-copy-btn {
+  border-radius: 999px;
+  border: 1px solid var(--panel-border);
+  background: var(--shadow-dark);
+  color: var(--text-light);
+  font-size: 10px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.gpt-code-copy-btn:hover {
+  border-color: var(--accent-primary);
+  background: rgba(34, 211, 238, 0.24);
+}
+
+/* Inline code pills */
+.gpt-inline-code {
+  display: inline-block;
+  padding: 0 3px;
+  border-radius: 4px;
+  background: var(--shadow-dark);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    'Liberation Mono', 'Courier New', monospace;
+  font-size: 11px;
+}
+
+/* highlight.js token coloring (themeable via CSS vars) */
+
+.gpt-code .hljs {
+  display: block;
+  color: var(--code-text);
+}
+
+.gpt-code .hljs-keyword,
+.gpt-code .hljs-selector-tag {
+  color: var(--hljs-keyword);
+  font-weight: 600;
+}
+
+.gpt-code .hljs-string,
+.gpt-code .hljs-attr {
+  color: var(--hljs-string);
+}
+
+.gpt-code .hljs-number,
+.gpt-code .hljs-literal {
+  color: var(--hljs-number);
+}
+
+.gpt-code .hljs-comment {
+  color: var(--hljs-comment);
+  font-style: italic;
+}
+
+.gpt-code .hljs-function .hljs-title,
+.gpt-code .hljs-title {
+  color: var(--hljs-function);
+}
+
+.gpt-code .hljs-variable,
+.gpt-code .hljs-params {
+  color: var(--hljs-variable);
+}
+
+/* ────────────────────────────────────────────
+   Usage / quota chip
+   ──────────────────────────────────────────── */
 
 .usage-chip {
   font-size: 11px;
@@ -816,10 +863,16 @@ body {
   left: 0;
   height: 100%;
   border-radius: 999px;
-  background: linear-gradient(to right, var(--accent-primary), var(--accent-secondary));
+  background: linear-gradient(
+    to right,
+    var(--accent-primary),
+    var(--accent-secondary)
+  );
 }
 
-/* Auth/login */
+/* ────────────────────────────────────────────
+   Auth / login
+   ──────────────────────────────────────────── */
 
 .login-shell {
   height: 100vh;
@@ -885,76 +938,15 @@ body {
   min-height: 14px;
 }
 
-.gpt-markdown {
-  font-size: 12px;
-}
+/* ────────────────────────────────────────────
+   Preview modal (assets + iframe)
+   ──────────────────────────────────────────── */
 
-.gpt-markdown code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
-    'Courier New', monospace;
-}
-/* Panel body for the files list so the New File button can sit at the bottom */
-.panel-body-files {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-}
-
-
-/* Utility to make buttons span the panel width */
-.button.full-width {
-  width: 100%;
-  justify-content: center;
-}
-
-.asset-copy-btn {
-  border: none;
-  background: transparent;
-  color: #64748b;
-  font-size: 10px;
-  padding: 0 4px;
-  cursor: pointer;
-}
-
-.asset-copy-btn:hover {
-  color: #22d3ee;
-}
-
-.asset-copy-btn,
-.asset-delete-btn {
-  border: none;
-  background: transparent;
-  color: var(--accent-secondary);
-  font-size: 10px;
-  padding: 0 4px;
-  cursor: pointer;
-}
-
-.asset-copy-btn:hover {
-  color: #22d3ee;
-}
-
-.asset-delete-btn:hover {
-  color: #f97373;
-}
-
-.asset-preview-btn {
-  border: none;
-  background: transparent;
-  color: var(--accent-secondary);
-  font-size: 10px;
-  padding: 0 4px;
-  cursor: pointer;
-}
-
-.asset-preview-btn:hover {
-  color: var(--accent-primary);
-}
 .preview-modal-backdrop {
   position: fixed;
   inset: 0;
   background: var(--bg-main);
-    display: flex;
+  display: flex;
   align-items: center;
   justify-content: center;
   z-index: 9999;
@@ -962,15 +954,15 @@ body {
 
 .preview-modal {
   width: min(960px, 90vw);
-  max-height: 90vh;          /* 🔁 was fixed height: min(540px, 80vh) */
-  height: auto;              /* let content drive height, up to 90vh */
+  max-height: 90vh;
+  height: auto;
   background: white;
   border-radius: 12px;
   border: 1px solid var(--panel-border);
-  box-shadow: 0 30px 80px rgba(15, 23, 42, 0.9);
+  box-shadow: 0 30px 80px var(--shadow-dark);
   display: flex;
   flex-direction: column;
-  overflow: hidden;          /* header + body stay inside rounded corners */
+  overflow: hidden;
 }
 
 .preview-modal-header {
@@ -981,33 +973,6 @@ body {
   padding: 8px 12px;
   border-bottom: 1px solid var(--panel-border);
 }
-
-.preview-modal-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  padding: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--bg-main);
-  overflow: hidden;
-}
-
-
-.preview-modal-media {
-  /* Fit width inside the modal */
-  max-width: 100%;
-  width: auto;
-
-  /* 🔑 Fit height inside the viewport (not just the body),
-     so tall/portrait images always fully show */
-  max-height: 80vh;
-  height: auto;
-
-  object-fit: contain;
-  display: block;
-}
-
 
 .preview-modal-title {
   font-size: 13px;
@@ -1033,7 +998,27 @@ body {
   color: var(--text-main);
 }
 
-/* iFrame preview variant: let iframe fill the body */
+.preview-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-main);
+  overflow: hidden;
+}
+
+.preview-modal-media {
+  max-width: 100%;
+  width: auto;
+  max-height: 80vh;
+  height: auto;
+  object-fit: contain;
+  display: block;
+}
+
+/* iframe preview variant */
 .preview-modal-body--iframe {
   align-items: stretch;
   justify-content: stretch;
@@ -1048,6 +1033,9 @@ body {
   min-height: min(720px, 70vh);
 }
 
+/* ────────────────────────────────────────────
+   Header: user menu / theme select
+   ──────────────────────────────────────────── */
 
 .app-header-user {
   position: relative;
@@ -1084,7 +1072,7 @@ body {
   border-radius: 8px;
   background: var(--button-alt);
   border: 1px solid var(--panel-border, #1f2937);
-  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.8);
+  box-shadow: 0 10px 30px var(--shadow-dark);
   z-index: 40;
 }
 
@@ -1119,11 +1107,11 @@ body {
   outline-offset: 2px;
 }
 
-/* Theme: default
-   (no overrides needed; uses :root vars)
-*/
+/* ────────────────────────────────────────────
+   Themes (panel-scoped tokens)
+   ──────────────────────────────────────────── */
 
-/* Theme: Midnight – darker code / panel look */
+/* Midnight – dark code / panel look */
 .panel.theme-midnight {
   --bg-main: #020617;
   --code-bg: #020617;
@@ -1131,47 +1119,60 @@ body {
   --text-main: #e5e7eb;
   --text-muted: #9ca3af;
   --panel-border: #1f2937;
+  --button-alt: #020617;
+  --button-main: #e5e7eb;
+
+  --hljs-keyword: #fb7185;
+  --hljs-string: #4ade80;
+  --hljs-number: #facc15;
+  --hljs-comment: #6b7280;
+  --hljs-function: #38bdf8;
+  --hljs-variable: #eab308;
 }
 
-/* Theme: Paper – light editor with soft code bg */
+/* Paper – light, clean */
 .panel.theme-paper {
-  /* panel + code backgrounds */
-  --bg-main: #ffffff;      /* panel/card background */
-  --code-bg: #f9fafb;      /* editor / GPT code area */
-
-  /* text */
+  --bg-main: #ffffff;
+  --code-bg: #f9fafb;
   --code-text: #020617;
   --text-main: #020617;
   --text-muted: #6b7280;
-
-  /* borders / structure */
-  --panel-border: #d1d5db; /* soft gray border, not too heavy */
-
-  /* accents (reuse your brand-ish colors but slightly calmer on white) */
-  --accent-primary: #22d3ee;  /* cyan line/highlight */
+  --panel-border: #d1d5db;
+  --accent-primary: #22d3ee;
   --accent-secondary: #a855f7;
+  --button-alt: #f3f4f6;
+  --button-main: #111827;
 
-  /* buttons inside Paper panels */
-  --button-alt: #f3f4f6;   /* default button bg */
-  --button-main: #111827;  /* button text */
+  --hljs-keyword: #ec4899;
+  --hljs-string: #16a34a;
+  --hljs-number: #ea580c;
+  --hljs-comment: #9ca3af;
+  --hljs-function: #2563eb;
+  --hljs-variable: #b45309;
 }
 
-/* Ocean C: neon reef */
+/* Ocean – neon reef (deep blue + coral) */
 .panel.theme-ocean {
-  --bg-main: #0e2073;        /* panel background */
-  --code-bg: #000814;        /* code / chat bg */
+  --bg-main: #0e2073;
+  --code-bg: #000814;
   --code-text: #f9fafb;
   --text-main: #e5e7eb;
   --text-muted: #9ca3af;
-  --panel-border: #fb7185;   /* warm coral border */
-  --accent-primary: #fb7185; /* coral */
-  --accent-secondary: #22d3ee; /* cyan pop */
-  --button-alt: #081427;     /* pill background */
-  --button-main: #f9fafb;    /* pill text */
+  --panel-border: #fb7185;
+  --accent-primary: #fb7185;
+  --accent-secondary: #22d3ee;
+  --button-alt: #081427;
+  --button-main: #f9fafb;
+
+  --hljs-keyword: #fb7185;
+  --hljs-string: #4ade80;
+  --hljs-number: #facc15;
+  --hljs-comment: #64748b;
+  --hljs-function: #38bdf8;
+  --hljs-variable: #eab308;
 }
 
-
-/* Theme: Flower – soft pink / violet */
+/* Flower – soft pink / violet */
 .panel.theme-flower {
   --bg-main: #fff7fb;
   --code-bg: #fdf2ff;
@@ -1181,9 +1182,18 @@ body {
   --panel-border: #f9a8d4;
   --accent-primary: #ec4899;
   --accent-secondary: #a855f7;
+  --button-alt: #fee2f2;
+  --button-main: #4a044e;
+
+  --hljs-keyword: #ec4899;
+  --hljs-string: #16a34a;
+  --hljs-number: #ea580c;
+  --hljs-comment: #a855f7;
+  --hljs-function: #7c3aed;
+  --hljs-variable: #b45309;
 }
 
-/* Theme: Default – neutral light */
+/* Default – neutral light, matches root but scoped to panel */
 .panel.theme-default {
   --bg-main: #ffffff;
   --code-bg: #f9fafb;
@@ -1195,26 +1205,35 @@ body {
   --accent-secondary: #a855f7;
   --button-alt: #f3f4f6;
   --button-main: #111827;
+
+  --hljs-keyword: #0f766e;
+  --hljs-string: #15803d;
+  --hljs-number: #b45309;
+  --hljs-comment: #9ca3af;
+  --hljs-function: #2563eb;
+  --hljs-variable: #7c2d12;
 }
 
-/* Default theme: make GPT code blocks light like the editor */
+/* Theme-specific GPT code block overrides */
+
+/* Default theme: light GPT code blocks */
 .panel.theme-default .gpt-code-block {
-  background: #f9fafb;          /* light code bg */
-  border-color: #d1d5db;        /* neutral gray border */
+  background: #f9fafb;
+  border-color: #d1d5db;
 }
 
 .panel.theme-default .gpt-code-header {
-  background: #e5e7eb;          /* light header strip */
+  background: #e5e7eb;
   border-bottom-color: #d1d5db;
 }
 
 .panel.theme-default .gpt-code {
   background: #f9fafb;
-  color: #020617;               /* dark ink, like the editor textarea */
+  color: #020617;
 }
 
 .panel.theme-default .gpt-code-lang {
-  color: #6b7280;               /* muted gray label */
+  color: #6b7280;
 }
 
 .panel.theme-default .gpt-code-copy-btn {
@@ -1225,11 +1244,75 @@ body {
 
 .panel.theme-default .gpt-code-copy-btn:hover {
   background: #e5e7eb;
-  border-color: #22d3ee;        /* little cyan pop on hover */
+  border-color: #22d3ee;
 }
 
+/* Paper theme: light GPT code blocks like editor */
+.panel.theme-paper .gpt-code-block {
+  background: #f9fafb;
+  border-color: #cbd5e1;
+}
 
-/* Responsive: stack vertically on narrower viewports */
+.panel.theme-paper .gpt-code-header {
+  background: #e5e7eb;
+  border-bottom-color: #cbd5e1;
+}
+
+.panel.theme-paper .gpt-code {
+  background: #f9fafb;
+  color: #020617;
+}
+
+.panel.theme-paper .gpt-code-lang {
+  color: #6b7280;
+}
+
+.panel.theme-paper .gpt-code-copy-btn {
+  background: #ffffff;
+  color: #111827;
+  border-color: #cbd5e1;
+}
+
+.panel.theme-paper .gpt-code-copy-btn:hover {
+  background: #e5e7eb;
+  border-color: #22d3ee;
+}
+
+/* Flower theme: pastel GPT code blocks */
+.panel.theme-flower .gpt-code-block {
+  background: #fdf2ff;
+  border-color: #f9a8d4;
+}
+
+.panel.theme-flower .gpt-code-header {
+  background: #fce7f3;
+  border-bottom-color: #f9a8d4;
+}
+
+.panel.theme-flower .gpt-code {
+  background: #fdf2ff;
+  color: #4a044e;
+}
+
+.panel.theme-flower .gpt-code-lang {
+  color: #a855f7;
+}
+
+.panel.theme-flower .gpt-code-copy-btn {
+  background: #fff7fb;
+  color: #4a044e;
+  border-color: #f9a8d4;
+}
+
+.panel.theme-flower .gpt-code-copy-btn:hover {
+  background: #fce7f3;
+  border-color: #ec4899;
+}
+
+/* ────────────────────────────────────────────
+   Responsive
+   ──────────────────────────────────────────── */
+
 @media (max-width: 1024px) {
   .editor-shell {
     flex-direction: column;
@@ -1255,6 +1338,6 @@ body {
   }
 
   .sidebar-section code {
-  max-width: 100%;
-}
+    max-width: 100%;
+  }
 }

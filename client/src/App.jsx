@@ -28,6 +28,21 @@ import remarkGfm from 'remark-gfm';
 import { normalizeSlug, isValidSlug } from './slugUtils'; // ⬅️ ADD THIS
 import { extractBestCodeBlock, stripCodeFences } from './utils/extractBestCodeBlock';
 
+// at the top of App.jsx (or a separate file imported into it)
+import hljs from 'highlight.js/lib/core';
+import javascript from 'highlight.js/lib/languages/javascript';
+import xml from 'highlight.js/lib/languages/xml'; // html
+import cssLang from 'highlight.js/lib/languages/css';
+import jsonLang from 'highlight.js/lib/languages/json';
+
+hljs.registerLanguage('javascript', javascript);
+hljs.registerLanguage('js', javascript);
+hljs.registerLanguage('html', xml);
+hljs.registerLanguage('xml', xml);
+hljs.registerLanguage('css', cssLang);
+hljs.registerLanguage('json', jsonLang);
+
+
 const IFRAME_ORIGIN =
   import.meta.env.VITE_IFRAME_ORIGIN ||
   window.location.origin.replace(/\/+$/, '');
@@ -1522,58 +1537,76 @@ const handleGptKeyDown = (e) => {
                       </li>
                     );
                   },
-                  code({ inline, className, children, ...props }) {
-                    const text = String(children || '');
-                    const codeText = text.replace(/\n$/, '');
-                    const match =
-                      typeof className === 'string'
-                        ? /language-(\w+)/.exec(className)
-                        : null;
-                    const langLabel = match?.[1] || 'code';
+code({ inline, className, children, ...props }) {
+  const text = String(children || '');
+  const codeText = text.replace(/\n$/, '');
 
-                    const handleCopy = async () => {
-                      try {
-                        if (navigator.clipboard?.writeText) {
-                          await navigator.clipboard.writeText(codeText);
-                        } else {
-                          window.prompt('Copy code:', codeText);
-                        }
-                      } catch (err) {
-                        console.error('Copy failed', err);
-                      }
-                    };
+  // language-js → "js" etc
+  const match =
+    typeof className === 'string'
+      ? /language-(\w+)/.exec(className)
+      : null;
+  const lang = match?.[1]?.toLowerCase();
 
-                    if (inline) {
-                      return (
-                        <code
-                          className="gpt-inline-code"
-                          {...props}
-                        >
-                          {children}
-                        </code>
-                      );
-                    }
+  const handleCopy = async () => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(codeText);
+      } else {
+        window.prompt('Copy code:', codeText);
+      }
+    } catch (err) {
+      console.error('Copy failed', err);
+    }
+  };
 
-                    return (
-                      <div className="gpt-code-block">
-                        <div className="gpt-code-header">
-                          <span className="gpt-code-lang">
-                            {langLabel}
-                          </span>
-                          <button
-                            type="button"
-                            className="gpt-code-copy-btn"
-                            onClick={handleCopy}
-                          >
-                            Copy
-                          </button>
-                        </div>
-                        <pre className="gpt-code">
-                          <code {...props}>{children}</code>
-                        </pre>
-                      </div>
-                    );
-                  },
+  // 🔹 Inline code: no syntax highlighting, just a pill
+  if (inline) {
+    return (
+      <code className="gpt-inline-code" {...props}>
+        {children}
+      </code>
+    );
+  }
+
+  // 🔹 Block code: run through highlight.js
+  let highlightedHtml = codeText;
+  try {
+    if (lang && hljs.getLanguage(lang)) {
+      highlightedHtml = hljs.highlight(codeText, { language: lang }).value;
+    } else {
+      highlightedHtml = hljs.highlightAuto(codeText).value;
+    }
+  } catch (err) {
+    console.error('highlight.js error', err);
+    highlightedHtml = codeText; // fallback if something explodes
+  }
+
+  const codeClass = ['hljs', className].filter(Boolean).join(' ');
+
+  return (
+    <div className="gpt-code-block">
+      <div className="gpt-code-header">
+        <span className="gpt-code-lang">{lang || 'code'}</span>
+        <button
+          type="button"
+          className="gpt-code-copy-btn"
+          onClick={handleCopy}
+        >
+          Copy
+        </button>
+      </div>
+      <pre className="gpt-code">
+        <code
+          className={codeClass}
+          dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+          {...props}
+        />
+      </pre>
+    </div>
+  );
+},
+
                 }}
               >
                 {msg.content}
