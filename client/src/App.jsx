@@ -26,6 +26,7 @@ import {
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { normalizeSlug, isValidSlug } from './slugUtils'; // ⬅️ ADD THIS
+import { extractBestCodeBlock, stripCodeFences } from './utils/extractBestCodeBlock';
 
 const IFRAME_ORIGIN =
   import.meta.env.VITE_IFRAME_ORIGIN ||
@@ -654,7 +655,15 @@ function AssetsPanel({ slug, onUsageRefresh, onAssetCountChange }) {
   );
 }
 
-function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
+function SpaceEditor({
+  slug,
+  showFiles,
+  showEditor,
+  showGpt,
+  onUsageRefresh,
+  onDirtyChange,
+  usage,
+}) {
   const [filesView, setFilesView] = useState('files');
   const [assetCount, setAssetCount] = useState(0);
   const [files, setFiles] = useState([]);
@@ -665,10 +674,16 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
   const [saving, setSaving] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
 
+  // GPT state
   const [gptPrompt, setGptPrompt] = useState('');
-  const [gptResponse, setGptResponse] = useState('');
   const [gptBusy, setGptBusy] = useState(false);
-  const [gptHistory, setGptHistory] = useState([]);
+  const [gptHistory, setGptHistory] = useState([]); // [{role, content}]
+  const [gptError, setGptError] = useState(null);
+  const [gptMeta, setGptMeta] = useState({
+    model: null,
+    sdkIncluded: false,
+    truncated: false,
+  });
 
   const [creatingFile, setCreatingFile] = useState(false);
   const [deletingFile, setDeletingFile] = useState(false);
@@ -680,7 +695,9 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewReloadKey, setPreviewReloadKey] = useState(0);
 
-  // 🔹 independent themes
+  const bothCodePanels = showEditor && showGpt;
+
+  // themes
   const [editorTheme, setEditorTheme] = useState(() => {
     if (typeof window === 'undefined') return 'default';
     return localStorage.getItem('editorTheme') || 'default';
@@ -690,6 +707,8 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
     if (typeof window === 'undefined') return 'default';
     return localStorage.getItem('gptTheme') || 'default';
   });
+
+  const gptMessagesRef = useRef(null);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -703,6 +722,13 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
     }
   }, [gptTheme]);
 
+  // Scroll GPT messages to bottom when history/error changes
+  useEffect(() => {
+    if (gptMessagesRef.current) {
+      gptMessagesRef.current.scrollTop = gptMessagesRef.current.scrollHeight;
+    }
+  }, [gptHistory, gptError]);
+
   const loadFiles = useCallback(async () => {
     setFilesLoading(true);
     try {
@@ -714,15 +740,6 @@ function SpaceEditor({ slug, showFiles, showEditor, showGpt, onUsageRefresh }) {
       setFilesLoading(false);
     }
   }, [slug]);
-
-const onReplaceWithGpt = () => {
-  if (!gptResponse || !selectedPath) return;
-  const code = extractBestCodeBlock(gptResponse, selectedPath);
-  if (!code) return;
-
-  setFileContent(code);
-  setHasUnsavedChanges(true);
-};
 
   const loadFile = useCallback(
     async (path) => {
@@ -762,6 +779,11 @@ const onReplaceWithGpt = () => {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [hasUnsavedChanges]);
 
+  // Report dirty state up to DashboardPage
+  useEffect(() => {
+    onDirtyChange?.(hasUnsavedChanges);
+  }, [hasUnsavedChanges, onDirtyChange]);
+
   const handleSelectFile = (nextPath) => {
     if (nextPath === selectedPath) return;
     if (hasUnsavedChanges) {
@@ -771,6 +793,10 @@ const onReplaceWithGpt = () => {
       if (!ok) return;
     }
     setSelectedPath(nextPath);
+    // reset GPT context when switching files
+    setGptHistory([]);
+    setGptError(null);
+    setGptMeta({ model: null, sdkIncluded: false, truncated: false });
   };
 
   const onSave = async () => {
@@ -780,9 +806,7 @@ const onReplaceWithGpt = () => {
       await saveSpaceFile(slug, selectedPath, fileContent);
       await loadFiles();
       setHasUnsavedChanges(false);
-      if (onUsageRefresh) {
-        onUsageRefresh();
-      }
+      onUsageRefresh?.();
     } catch (err) {
       console.error(err);
     } finally {
@@ -839,9 +863,7 @@ const onReplaceWithGpt = () => {
       await loadFiles();
       setSelectedPath(trimmed);
       await loadFile(trimmed);
-      if (onUsageRefresh) {
-        onUsageRefresh();
-      }
+      onUsageRefresh?.();
     } catch (err) {
       console.error(err);
       window.alert('Failed to create file. Check console for details.');
@@ -870,9 +892,7 @@ const onReplaceWithGpt = () => {
         }
       }
 
-      if (onUsageRefresh) {
-        onUsageRefresh();
-      }
+      onUsageRefresh?.();
     } catch (err) {
       console.error(err);
       window.alert('Failed to delete file. Check console for details.');
@@ -908,9 +928,7 @@ const onReplaceWithGpt = () => {
         setSelectedPath(trimmed);
         await loadFile(trimmed);
       }
-      if (onUsageRefresh) {
-        onUsageRefresh();
-      }
+      onUsageRefresh?.();
     } catch (err) {
       console.error(err);
       window.alert('Failed to rename file. Check console for details.');
@@ -919,10 +937,18 @@ const onReplaceWithGpt = () => {
     }
   };
 
+  // GPT quota info from usage
+  const gptUsage = usage?.gptUsage || null;
+  const gptCalls = typeof gptUsage?.calls === 'number' ? gptUsage.calls : 0;
+  const gptDailyLimit =
+    typeof gptUsage?.dailyLimit === 'number' ? gptUsage.dailyLimit : null;
+  const gptQuotaReached =
+    gptDailyLimit !== null && gptCalls >= gptDailyLimit;
+
   const onRunGpt = async () => {
-    if (!gptPrompt.trim()) return;
+    if (!gptPrompt.trim() || gptQuotaReached) return;
     setGptBusy(true);
-    setGptResponse('');
+    setGptError(null);
 
     const historyToSend = gptHistory.slice(-10);
 
@@ -935,85 +961,152 @@ const onReplaceWithGpt = () => {
       });
 
       const content = data.message?.content || '';
-      setGptResponse(content);
-      
-    setGptHistory((prev) => [
-      ...prev,
-      { role: 'user', content: gptPrompt },
-      { role: 'assistant', content },
-    ]);
-        onUsageRefresh?.();
-  } catch (err) {
-    console.error(err);
-    setGptResponse(err.payload?.message || 'GPT request failed.');
-  } finally {
-    setGptBusy(false);
-  }
-};
 
+      setGptHistory((prev) => {
+        const next = [
+          ...prev,
+          { role: 'user', content: gptPrompt },
+          { role: 'assistant', content },
+        ];
+        return next.slice(-50); // cap history
+      });
 
-    const handleGptKeyDown = (e) => {
+      setGptMeta({
+        model: data.model,
+        sdkIncluded: !!data.sdkIncluded,
+        truncated: !!data.fileContextTruncated,
+      });
+
+      setGptPrompt('');
+      setGptError(null);
+      onUsageRefresh?.();
+    } catch (err) {
+      console.error(err);
+      const status = err.status;
+      const code = err.payload?.error;
+
+      if (status === 429 && code === 'gpt_quota_exceeded') {
+        setGptError(
+          err.payload?.message ||
+            'Daily GPT limit reached for this account.'
+        );
+      } else if (status === 429 && code === 'rate_limited') {
+        setGptError(
+          err.payload?.message ||
+            'Too many GPT requests. Try again in a moment.'
+        );
+      } else if (status === 503 && code === 'gpt_disabled') {
+        setGptError(
+          'GPT is disabled on this server (no API key configured).'
+        );
+      } else {
+        setGptError(err.payload?.message || 'GPT request failed.');
+      }
+    } finally {
+      setGptBusy(false);
+    }
+  };
+
+  const handleGptKeyDown = (e) => {
     if (e.key === 'Enter') {
-      // Alt+Enter (or any modifier) → let the browser insert a newline
       if (e.altKey || e.shiftKey || e.metaKey || e.ctrlKey) {
         return;
       }
-
-      // Bare Enter → send if possible
       e.preventDefault();
-      if (!gptBusy && gptPrompt.trim()) {
+      if (!gptBusy && gptPrompt.trim() && !gptQuotaReached) {
         onRunGpt();
       }
     }
   };
 
-  const onCopyGptText = async () => {
-    if (!gptResponse) return;
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(gptResponse);
-      } else {
-        window.prompt('Copy GPT output:', gptResponse);
+  function inferPreferredLangFromPath(filePath) {
+    const p = String(filePath || '').toLowerCase();
+    if (p.endsWith('.html') || p.endsWith('.htm')) return 'html';
+    if (p.endsWith('.css')) return 'css';
+    if (p.endsWith('.json')) return 'json';
+    if (p.endsWith('.js') || p.endsWith('.mjs')) return 'javascript';
+    return 'text';
+  }
+
+  const getLastAssistantContent = useCallback(() => {
+    for (let i = gptHistory.length - 1; i >= 0; i -= 1) {
+      const msg = gptHistory[i];
+      if (msg && msg.role === 'assistant' && typeof msg.content === 'string') {
+        return msg.content;
       }
+    }
+    return '';
+  }, [gptHistory]);
+
+  const onCopyGptText = async () => {
+    const content = getLastAssistantContent();
+    if (!content) return;
+
+    try {
+      const preferredLang = inferPreferredLangFromPath(selectedPath);
+      const best = extractBestCodeBlock(content, preferredLang);
+
+      const textToCopy =
+        best?.code?.length ? best.code : stripCodeFences(content || '');
+
+      await navigator.clipboard.writeText(textToCopy);
     } catch (err) {
       console.error(err);
-      window.alert('Failed to copy GPT output. Check console for details.');
     }
   };
 
-  const handleFileListKeyDown = (e) => {
-  if (!files.length) return;
+  const onReplaceWithGpt = () => {
+    const content = getLastAssistantContent();
+    if (!content || !selectedPath) return;
 
-  // Where are we now?
-  const currentIndex = files.findIndex((f) => f.name === selectedPath);
-  const idx = currentIndex === -1 ? 0 : currentIndex;
-
-  if (e.key === 'ArrowDown') {
-    e.preventDefault();
-    const nextIndex = Math.min(files.length - 1, idx + 1);
-    const nextName = files[nextIndex].name;
-    handleSelectFile(nextName);
-  } else if (e.key === 'ArrowUp') {
-    e.preventDefault();
-    const nextIndex = Math.max(0, idx - 1);
-    const nextName = files[nextIndex].name;
-    handleSelectFile(nextName);
-  } else if (e.key === 'Enter') {
-    e.preventDefault();
-    if (idx >= 0 && idx < files.length) {
-      const name = files[idx].name;
-      handleSelectFile(name);
+    if (gptMeta.truncated) {
+      const ok = window.confirm(
+        'The file sent to GPT was truncated for context size. Its suggestion may be incomplete. Replace the entire file anyway?'
+      );
+      if (!ok) return;
     }
-  }
-};
 
+    const best = extractBestCodeBlock(content, selectedPath);
+    const newContent =
+      best?.code?.length ? best.code : stripCodeFences(content || '');
+
+    if (!newContent) return;
+
+    setFileContent(newContent);
+    setHasUnsavedChanges(true);
+  };
+
+  const handleFileListKeyDown = (e) => {
+    if (!files.length) return;
+
+    const currentIndex = files.findIndex((f) => f.name === selectedPath);
+    const idx = currentIndex === -1 ? 0 : currentIndex;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      const nextIndex = Math.min(files.length - 1, idx + 1);
+      const nextName = files[nextIndex].name;
+      handleSelectFile(nextName);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      const nextIndex = Math.max(0, idx - 1);
+      const nextName = files[nextIndex].name;
+      handleSelectFile(nextName);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (idx >= 0 && idx < files.length) {
+        const name = files[idx].name;
+        handleSelectFile(name);
+      }
+    }
+  };
 
   const onCopyIframeUrl = async () => {
     if (!selectedPath) return;
 
-    const url = `${IFRAME_ORIGIN}/p/${encodeURIComponent(slug)}/${encodeURIComponent(
-      selectedPath
-    )}`;
+    const url = `${IFRAME_ORIGIN}/p/${encodeURIComponent(
+      slug
+    )}/${encodeURIComponent(selectedPath)}`;
 
     try {
       setCopyingUrl(true);
@@ -1048,124 +1141,133 @@ const onReplaceWithGpt = () => {
     setPreviewOpen(false);
   };
 
+  // ───────────────── render ─────────────────
   return (
     <>
       <div className="app-content">
         <div className="editor-shell">
-{/* Files panel */}
-{showFiles && (
-  <div className="panel panel--files">
-    <div className="panel-header">
-      <div className="panel-header-left">
-        <div className="panel-title">Files</div>
-        <div className="panel-subtitle">
-          {filesView === 'files'
-            ? (filesLoading
-                ? 'Loading…'
-                : `${files.length} file${files.length === 1 ? '' : 's'}`)
-            : `${assetCount} asset${assetCount === 1 ? '' : 's'}`}
-        </div>
-      </div>
+          {/* Files panel */}
+          {showFiles && (
+            <div className="panel panel--files">
+              <div className="panel-header">
+                <div className="panel-header-left">
+                  <div className="panel-title">Files</div>
+                  <div className="panel-subtitle">
+                    {filesView === 'files'
+                      ? filesLoading
+                        ? 'Loading…'
+                        : `${files.length} file${
+                            files.length === 1 ? '' : 's'
+                          }`
+                      : `${assetCount} asset${
+                          assetCount === 1 ? '' : 's'
+                        }`}
+                  </div>
+                </div>
 
-      <div className="panel-header-right">
-        <div className="files-toggle">
-          <button
-            type="button"
-            className={
-              'files-toggle-button' +
-              (filesView === 'files' ? ' active' : '')
-            }
-            onClick={() => setFilesView('files')}
-          >
-            Files
-          </button>
-          <button
-            type="button"
-            className={
-              'files-toggle-button' +
-              (filesView === 'assets' ? ' active' : '')
-            }
-            onClick={() => setFilesView('assets')}
-          >
-            Assets
-          </button>
-        </div>
-      </div>
-    </div>
+                <div className="panel-header-right">
+                  <div className="files-toggle">
+                    <button
+                      type="button"
+                      className={
+                        'files-toggle-button' +
+                        (filesView === 'files' ? ' active' : '')
+                      }
+                      onClick={() => setFilesView('files')}
+                    >
+                      Files
+                    </button>
+                    <button
+                      type="button"
+                      className={
+                        'files-toggle-button' +
+                        (filesView === 'assets' ? ' active' : '')
+                      }
+                      onClick={() => setFilesView('assets')}
+                    >
+                      Assets
+                    </button>
+                  </div>
+                </div>
+              </div>
 
-    {filesView === 'files' ? (
-      <>
-        <div className="panel-body-files">
-          <ul
-            className="file-list"
-            tabIndex={0}
-            onKeyDown={handleFileListKeyDown}
-          >
-              {files.map((f) => (
-              <li
-                key={f.name}
-                className={
-                  'file-item' + (selectedPath === f.name ? ' active' : '')
-                }
-                onClick={() => handleSelectFile(f.name)}
-              >
-                <span className="file-item-name">{f.name}</span>
-                <span className="file-item-actions">
-                  <button
-                    type="button"
-                    className="file-item-rename"
-                    title="Rename file"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onRenameFile(f.name);
-                    }}
-                    disabled={renamingFile}
-                  >
-                    ✎
-                  </button>
-                  <button
-                    type="button"
-                    className="file-item-delete"
-                    title="Delete file"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onDeleteFile(f.name);
-                    }}
-                    disabled={deletingFile}
-                  >
-                    ✕
-                  </button>
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
+              {filesView === 'files' ? (
+                <>
+                  <div className="panel-body-files">
+                    <ul
+                      className="file-list"
+                      tabIndex={0}
+                      onKeyDown={handleFileListKeyDown}
+                    >
+                      {files.map((f) => (
+                        <li
+                          key={f.name}
+                          className={
+                            'file-item' +
+                            (selectedPath === f.name ? ' active' : '')
+                          }
+                          onClick={() => handleSelectFile(f.name)}
+                        >
+                          <span className="file-item-name">{f.name}</span>
+                          <span className="file-item-actions">
+                            <button
+                              type="button"
+                              className="file-item-rename"
+                              title="Rename file"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onRenameFile(f.name);
+                              }}
+                              disabled={renamingFile}
+                            >
+                              ✎
+                            </button>
+                            <button
+                              type="button"
+                              className="file-item-delete"
+                              title="Delete file"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onDeleteFile(f.name);
+                              }}
+                              disabled={deletingFile}
+                            >
+                              ✕
+                            </button>
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
 
-        <div style={{ marginTop: 8 }}>
-          <button
-            type="button"
-            className="button small full-width"
-            onClick={onNewFile}
-            disabled={creatingFile}
-          >
-            {creatingFile ? 'Creating…' : '+ New file'}
-          </button>
-        </div>
-      </>
-    ) : (
-      <AssetsPanel
-        slug={slug}
-        onUsageRefresh={onUsageRefresh}
-        onAssetCountChange={setAssetCount}
-      />
-    )}
-  </div>
-)}
-
+                  <div style={{ marginTop: 8 }}>
+                    <button
+                      type="button"
+                      className="button small full-width"
+                      onClick={onNewFile}
+                      disabled={creatingFile}
+                    >
+                      {creatingFile ? 'Creating…' : '+ New file'}
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <AssetsPanel
+                  slug={slug}
+                  onUsageRefresh={onUsageRefresh}
+                  onAssetCountChange={setAssetCount}
+                />
+              )}
+            </div>
+          )}
 
           {/* Editor panel */}
           {showEditor && (
-            <div className={`panel panel--editor theme-${editorTheme}`}>
+            <div
+              className={`panel panel--editor theme-${editorTheme} ${
+                bothCodePanels ? 'panel--editor-half' : ''
+              }`}
+            >
               <div className="panel-header">
                 <div className="panel-header-left">
                   <div className="panel-title">Editor</div>
@@ -1191,18 +1293,17 @@ const onReplaceWithGpt = () => {
                   </div>
                 </div>
                 <div>
-                <select
-                  className="theme-select"
-                  value={editorTheme}
-                  onChange={(e) => setEditorTheme(e.target.value)}
+                  <select
+                    className="theme-select"
+                    value={editorTheme}
+                    onChange={(e) => setEditorTheme(e.target.value)}
                   >
-                  <option value="default">Default</option>
-                  <option value="midnight">Midnight</option>
-                  <option value="paper">Paper</option>
-                  <option value="ocean">Ocean</option>
-                  <option value="flower">Flower</option>
-                </select>
-
+                    <option value="default">Default</option>
+                    <option value="midnight">Midnight</option>
+                    <option value="paper">Paper</option>
+                    <option value="ocean">Ocean</option>
+                    <option value="flower">Flower</option>
+                  </select>
                 </div>
               </div>
 
@@ -1226,9 +1327,15 @@ const onReplaceWithGpt = () => {
                       <button
                         className="button primary"
                         onClick={onSave}
-                        disabled={saving || !hasUnsavedChanges || !selectedPath}
+                        disabled={
+                          saving || !hasUnsavedChanges || !selectedPath
+                        }
                       >
-                        {saving ? 'Saving…' : hasUnsavedChanges ? 'Save file' : 'Saved'}
+                        {saving
+                          ? 'Saving…'
+                          : hasUnsavedChanges
+                          ? 'Save file'
+                          : 'Saved'}
                       </button>
                       <button
                         className="button small"
@@ -1284,16 +1391,31 @@ const onReplaceWithGpt = () => {
 
           {/* GPT panel */}
           {showGpt && (
-              <div
-               className={`panel panel--gpt theme-${gptTheme} ${
-                 !showEditor ? 'panel--gpt-full' : ''
-               }`}
-                >      
-                <div className="panel-header">
+            <div
+              className={`panel panel--gpt theme-${gptTheme} ${
+                !showEditor
+                  ? 'panel--gpt-full'
+                  : bothCodePanels
+                  ? 'panel--gpt-half'
+                  : ''
+              }`}
+            >
+              <div className="panel-header">
                 <div className="panel-header-left">
                   <div className="panel-title">GPT helper</div>
                   <div className="panel-subtitle">
-                    Model: gpt-4.1-mini · File: {selectedPath || 'none'}
+                    Model: {gptMeta.model || 'gpt-4.1-mini'} · File:{' '}
+                    {selectedPath || 'none'}
+                    {gptMeta.sdkIncluded && (
+                      <span className="pill pill--tiny">
+                        Portals SDK context
+                      </span>
+                    )}
+                    {gptMeta.truncated && (
+                      <span className="pill pill--tiny pill--warn">
+                        Large file (partial)
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div>
@@ -1308,60 +1430,80 @@ const onReplaceWithGpt = () => {
                     <option value="ocean">Ocean</option>
                     <option value="flower">Flower</option>
                   </select>
-
                 </div>
               </div>
 
-              <div className="gpt-messages">
-                {gptResponse ? (
-                  <ReactMarkdown
-                    className="gpt-markdown"
-                    remarkPlugins={[remarkGfm]}
-                    components={{
-                      code({ inline, className, children, ...props }) {
-                        if (inline) {
-                          return (
-                            <code className={className} {...props}>
-                              {children}
-                            </code>
-                          );
-                        }
-                        return (
-                          <pre className="gpt-code">
-                            <code className={className} {...props}>
-                              {children}
-                            </code>
-                          </pre>
-                        );
-                      },
-                      p({ children, ...props }) {
-                        return (
-                          <p style={{ margin: '0 0 6px', fontSize: 12 }} {...props}>
-                            {children}
-                          </p>
-                        );
-                      },
-                      li({ children, ...props }) {
-                        return (
-                          <li style={{ marginBottom: 4 }} {...props}>
-                            {children}
-                          </li>
-                        );
-                      },
-                    }}
+              <div className="gpt-messages" ref={gptMessagesRef}>
+                {gptHistory.length === 0 && !gptError && (
+                  <div
+                    style={{ fontSize: 12, color: 'var(--code-text)' }}
                   >
-                    {gptResponse}
-                  </ReactMarkdown>
-                ) : (
-                  <div style={{ fontSize: 12, color: 'var(--code-text)' }}>
-                    Ask GPT to help refactor your HUD or generate snippets. It will see the current
-                    file when a path is selected.
+                    Ask GPT to help refactor your HUD or generate snippets.
+                    It will see the current file when a path is selected.
+                  </div>
+                )}
+
+                {gptHistory.map((msg, index) =>
+                  msg.role === 'assistant' ? (
+<div
+  key={index}
+  className="gpt-message gpt-message--assistant"
+>
+  <div className="gpt-markdown">
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        p({ children, ...props }) {
+          return (
+            <p
+              style={{ margin: '0 0 6px', fontSize: 12 }}
+              {...props}
+            >
+              {children}
+            </p>
+          );
+        },
+        li({ children, ...props }) {
+          return (
+            <li
+              style={{ marginBottom: 4 }}
+              {...props}
+            >
+              {children}
+            </li>
+          );
+        },
+      }}
+    >
+      {msg.content}
+    </ReactMarkdown>
+  </div>
+</div>
+
+                  ) : (
+                    <div
+                      key={index}
+                      className="gpt-message gpt-message--user"
+                    >
+                      {msg.content}
+                    </div>
+                  )
+                )}
+
+                {gptError && (
+                  <div className="gpt-message gpt-message--error">
+                    {gptError}
                   </div>
                 )}
               </div>
+
               <div className="gpt-input">
                 <textarea
-                  placeholder="e.g. “Add a pulsing border around the HUD”"
+                  placeholder={
+                    selectedPath
+                      ? 'e.g. “Add a pulsing border around the HUD”'
+                      : 'Tip: select a file so GPT can see your overlay code, then ask for changes.'
+                  }
                   value={gptPrompt}
                   onChange={(e) => setGptPrompt(e.target.value)}
                   onKeyDown={handleGptKeyDown}
@@ -1375,19 +1517,31 @@ const onReplaceWithGpt = () => {
                     flexWrap: 'wrap',
                   }}
                 >
-                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  <div
+                    style={{
+                      display: 'flex',
+                      gap: 6,
+                      flexWrap: 'wrap',
+                    }}
+                  >
                     <button
                       className="button primary"
                       onClick={onRunGpt}
-                      disabled={gptBusy || !gptPrompt.trim()}
+                      disabled={
+                        gptBusy || !gptPrompt.trim() || gptQuotaReached
+                      }
                     >
-                      {gptBusy ? 'Thinking…' : 'Ask GPT'}
+                      {gptBusy
+                        ? 'Thinking…'
+                        : gptQuotaReached
+                        ? 'Daily limit reached'
+                        : 'Ask GPT'}
                     </button>
                     <button
                       className="button small"
                       type="button"
                       onClick={onCopyGptText}
-                      disabled={!gptResponse}
+                      disabled={!getLastAssistantContent()}
                     >
                       Copy output
                     </button>
@@ -1395,13 +1549,23 @@ const onReplaceWithGpt = () => {
                       className="button small"
                       type="button"
                       onClick={onReplaceWithGpt}
-                      disabled={!gptResponse || !selectedPath}
+                      disabled={!getLastAssistantContent() || !selectedPath}
                     >
-                    Replace file
-                  </button>
+                      Replace active file
+                    </button>
                   </div>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                    Uses your daily GPT quota.
+                  <div
+                    style={{ fontSize: 11, color: 'var(--text-muted)' }}
+                  >
+                    {gptDailyLimit !== null ? (
+                      gptQuotaReached ? (
+                        <>Daily GPT limit reached ({gptCalls} / {gptDailyLimit} calls)</>
+                      ) : (
+                        <>Uses your daily GPT quota ({gptCalls} / {gptDailyLimit} calls today)</>
+                      )
+                    ) : (
+                      <>Uses your daily GPT quota.</>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1437,22 +1601,23 @@ const onReplaceWithGpt = () => {
               </button>
             </div>
             <div className="preview-modal-body preview-modal-body--iframe">
-            <iframe
-              key={previewReloadKey}
-             src={`${IFRAME_ORIGIN}/p/${encodeURIComponent(slug)}/${encodeURIComponent(
-               selectedPath
-             )}`}
-             title={`Preview ${slug}/${selectedPath}`}
-             className="preview-modal-iframe"
-            />
+              <iframe
+                key={previewReloadKey}
+                src={`${IFRAME_ORIGIN}/p/${encodeURIComponent(
+                  slug
+                )}/${encodeURIComponent(selectedPath)}`}
+                title={`Preview ${slug}/${selectedPath}`}
+                className="preview-modal-iframe"
+              />
             </div>
-
           </div>
         </div>
       )}
     </>
   );
 }
+
+
 
 function DashboardPage() {
   const { me, loading, refresh } = useMe();
@@ -1461,7 +1626,7 @@ function DashboardPage() {
 
   const [activeSlug, setActiveSlug] = useState(null);
   const [usage, setUsage] = useState(null);
-
+  const [spaceDirty, setSpaceDirty] = useState(false); 
   // panel visibility lives here so sidebar controls it
   const [showFiles, setShowFiles] = useState(true);
   const [showEditor, setShowEditor] = useState(true);
@@ -1554,6 +1719,22 @@ function DashboardPage() {
     }
   }, [navigate, refresh]);
 
+    const handleSelectSpace = useCallback(
+    (slug) => {
+      if (slug === activeSlug) return;
+
+      if (spaceDirty) {
+        const ok = window.confirm(
+          'You have unsaved changes in this space. Switch spaces and discard them?'
+        );
+        if (!ok) return;
+      }
+
+      setActiveSlug(slug);
+    },
+    [activeSlug, spaceDirty]
+  );
+
     const handleToggleFiles = useCallback(() => {
     setShowFiles((prev) => {
       const next = !prev;
@@ -1642,9 +1823,7 @@ function DashboardPage() {
       <Sidebar
         spaces={spaces}
         activeSlug={activeSlug}
-        onSelect={(slug) => {
-          setActiveSlug(slug);
-        }}
+        onSelect={handleSelectSpace}
         usage={usage}
         showFiles={showFiles}
         showEditor={showEditor}
@@ -1652,16 +1831,20 @@ function DashboardPage() {
         onToggleFiles={handleToggleFiles}
         onToggleEditor={handleToggleEditor}
         onToggleGpt={handleToggleGpt}
-        onUsageRefresh={() => refreshUsage(activeSlug)}
+        // (you can drop this next prop if you like; Sidebar doesn't use it)
+        // onUsageRefresh={() => refreshUsage(activeSlug)}
       />
       {activeSlug ? (
         <SpaceEditor
+          key={activeSlug}
           slug={activeSlug}
           showFiles={showFiles}
           showEditor={showEditor}
           showGpt={showGpt}
           onUsageRefresh={() => refreshUsage(activeSlug)}
+          onDirtyChange={setSpaceDirty}
         />
+
       ) : (
         <div
           className="app-content"

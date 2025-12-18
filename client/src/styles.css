@@ -11,6 +11,8 @@
   --text-main: #000000;
   --text-muted: #6c7589;
   --text-light: #e2e2e2;
+
+  --button-main:#000000;
   --button-alt: #abd4ec;
 
   --code-bg: #000000;
@@ -51,7 +53,7 @@ body {
 /* Layout */
 
 .app-shell {
-  min-height: 100vh;
+  height: 100vh;
   display: flex;
   flex-direction: column;
 }
@@ -106,7 +108,7 @@ body {
   border-radius: 999px;
   border: 1px solid var(--accent-secondary);
   background: var(--button-alt);
-  color: var(--text-main);
+  color: var(--button-main);
 }
 
 .badge-pill.ok {
@@ -298,6 +300,19 @@ body {
   min-width: 0;
 }
 
+/* When GPT is the only main panel, let it fill */
+.panel--gpt-full {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* When Editor + GPT are both visible, split remaining space 50/50 */
+.panel--editor-half,
+.panel--gpt-half {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
 .panel-header-right {
   display: flex;
   align-items: center;
@@ -325,7 +340,7 @@ body {
 
 .files-toggle-button.active {
   background: var(--button-alt);
-  color: var(--text-main);
+  color: var(--button-main);
 }
 
 .files-toggle-button:not(.active):hover {
@@ -456,7 +471,7 @@ body {
   border-radius: 999px;
   border: 1px solid var(--panel-border);
   background: var(--button-alt);
-  color: var(--text-main);
+  color: var(--button-main);
   font-size: 12px;
   padding: 6px 12px;
   cursor: pointer;
@@ -474,6 +489,8 @@ body {
 .button.small {
   padding: 4px 9px;
   font-size: 11px;
+  background: var(--button-alt);
+  color: var(--button-main);
 }
 
 .button:disabled {
@@ -549,7 +566,7 @@ body {
   border: 1px solid var(--panel-border);
   padding: 3px 8px;
   background: var(--button-alt);
-  color: var(--text-main);
+  color: var(--button-main);
 }
 
 .usage-bar {
