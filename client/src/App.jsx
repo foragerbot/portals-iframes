@@ -696,6 +696,9 @@ function SpaceEditor({
   const [previewReloadKey, setPreviewReloadKey] = useState(0);
 
   const bothCodePanels = showEditor && showGpt;
+  const [editorFontSize, setEditorFontSize] = useState(12);
+  const [gptFontSize, setGptFontSize] = useState(12);
+
 
   // themes
   const [editorTheme, setEditorTheme] = useState(() => {
@@ -946,78 +949,85 @@ function SpaceEditor({
     gptDailyLimit !== null && gptCalls >= gptDailyLimit;
 
   const onRunGpt = async () => {
-    if (!gptPrompt.trim() || gptQuotaReached) return;
-    setGptBusy(true);
+  if (!gptPrompt.trim() || gptQuotaReached || gptBusy) return;
+
+  const promptText = gptPrompt.trim();
+  const historyToSend = gptHistory.slice(-10); // prior turns only
+
+  setGptBusy(true);
+  setGptError(null);
+  setGptPrompt(''); // clear textarea immediately
+
+  // Optimistically append the user message to the chat
+  setGptHistory((prev) => {
+    const next = [...prev, { role: 'user', content: promptText }];
+    return next.slice(-50);
+  });
+
+  try {
+    const data = await callSpaceGpt(slug, {
+      prompt: promptText,
+      filePath: selectedPath || undefined,
+      fileContent: fileContent || '',
+      messages: historyToSend,
+    });
+
+    const content = data.message?.content || '';
+
+    // Append GPT reply
+    setGptHistory((prev) => {
+      const next = [...prev, { role: 'assistant', content }];
+      return next.slice(-50);
+    });
+
+    setGptMeta({
+      model: data.model,
+      sdkIncluded: !!data.sdkIncluded,
+      truncated: !!data.fileContextTruncated,
+    });
+
     setGptError(null);
+    onUsageRefresh?.();
+  } catch (err) {
+    console.error(err);
+    const status = err.status;
+    const code = err.payload?.error;
 
-    const historyToSend = gptHistory.slice(-10);
+    let message =
+      err.payload?.message || 'GPT request failed.';
 
-    try {
-      const data = await callSpaceGpt(slug, {
-        prompt: gptPrompt,
-        filePath: selectedPath || undefined,
-        fileContent: fileContent || '',
-        messages: historyToSend,
-      });
-
-      const content = data.message?.content || '';
-
-      setGptHistory((prev) => {
-        const next = [
-          ...prev,
-          { role: 'user', content: gptPrompt },
-          { role: 'assistant', content },
-        ];
-        return next.slice(-50); // cap history
-      });
-
-      setGptMeta({
-        model: data.model,
-        sdkIncluded: !!data.sdkIncluded,
-        truncated: !!data.fileContextTruncated,
-      });
-
-      setGptPrompt('');
-      setGptError(null);
-      onUsageRefresh?.();
-    } catch (err) {
-      console.error(err);
-      const status = err.status;
-      const code = err.payload?.error;
-
-      if (status === 429 && code === 'gpt_quota_exceeded') {
-        setGptError(
-          err.payload?.message ||
-            'Daily GPT limit reached for this account.'
-        );
-      } else if (status === 429 && code === 'rate_limited') {
-        setGptError(
-          err.payload?.message ||
-            'Too many GPT requests. Try again in a moment.'
-        );
-      } else if (status === 503 && code === 'gpt_disabled') {
-        setGptError(
-          'GPT is disabled on this server (no API key configured).'
-        );
-      } else {
-        setGptError(err.payload?.message || 'GPT request failed.');
-      }
-    } finally {
-      setGptBusy(false);
+    if (status === 429 && code === 'gpt_quota_exceeded') {
+      message =
+        err.payload?.message ||
+        'Daily GPT limit reached for this account.';
+    } else if (status === 429 && code === 'rate_limited') {
+      message =
+        err.payload?.message ||
+        'Too many GPT requests. Try again in a moment.';
+    } else if (status === 503 && code === 'gpt_disabled') {
+      message =
+        'GPT is disabled on this server (no API key configured).';
     }
-  };
 
-  const handleGptKeyDown = (e) => {
-    if (e.key === 'Enter') {
-      if (e.altKey || e.shiftKey || e.metaKey || e.ctrlKey) {
-        return;
-      }
-      e.preventDefault();
-      if (!gptBusy && gptPrompt.trim() && !gptQuotaReached) {
-        onRunGpt();
-      }
+    setGptError(message);
+  } finally {
+    setGptBusy(false);
+  }
+};
+
+
+const handleGptKeyDown = (e) => {
+  if (e.key === 'Enter') {
+    if (e.altKey || e.shiftKey || e.metaKey || e.ctrlKey) {
+      return; // newline
     }
-  };
+    e.preventDefault();
+    if (!gptBusy && !gptQuotaReached && gptPrompt.trim()) {
+      onRunGpt();
+    }
+  }
+};
+
 
   function inferPreferredLangFromPath(filePath) {
     const p = String(filePath || '').toLowerCase();
@@ -1188,6 +1198,7 @@ function SpaceEditor({
                       Assets
                     </button>
                   </div>
+
                 </div>
               </div>
 
@@ -1267,6 +1278,7 @@ function SpaceEditor({
               className={`panel panel--editor theme-${editorTheme} ${
                 bothCodePanels ? 'panel--editor-half' : ''
               }`}
+               style={{ '--editor-code-font-size': `${editorFontSize}px` }}
             >
               <div className="panel-header">
                 <div className="panel-header-left">
@@ -1292,6 +1304,22 @@ function SpaceEditor({
                     )}
                   </div>
                 </div>
+                <div className="font-size-controls">
+    <button
+      type="button"
+      className="button small"
+      onClick={() => setEditorFontSize((s) => Math.max(10, s - 1))}
+    >
+      A-
+    </button>
+    <button
+      type="button"
+      className="button small"
+      onClick={() => setEditorFontSize((s) => Math.min(18, s + 1))}
+    >
+      A+
+    </button>
+  </div>
                 <div>
                   <select
                     className="theme-select"
@@ -1393,12 +1421,11 @@ function SpaceEditor({
           {showGpt && (
             <div
               className={`panel panel--gpt theme-${gptTheme} ${
-                !showEditor
-                  ? 'panel--gpt-full'
-                  : bothCodePanels
-                  ? 'panel--gpt-half'
-                  : ''
-              }`}
+                !showEditor ? 'panel--gpt-full' : bothCodePanels ? 'panel--gpt-half' : '' }`}
+                    style={{
+                   '--gpt-font-size': `${gptFontSize}px`,
+                   '--gpt-code-font-size': `${Math.max(10, gptFontSize - 1)}px`,
+               }}
             >
               <div className="panel-header">
                 <div className="panel-header-left">
@@ -1418,6 +1445,22 @@ function SpaceEditor({
                     )}
                   </div>
                 </div>
+    <div className="font-size-controls">
+      <button
+        type="button"
+        className="button small"
+        onClick={() => setGptFontSize((s) => Math.max(10, s - 1))}
+      >
+        A-
+      </button>
+      <button
+        type="button"
+        className="button small"
+        onClick={() => setGptFontSize((s) => Math.min(18, s + 1))}
+      >
+        A+
+      </button>
+    </div>
                 <div>
                   <select
                     className="theme-select"
@@ -1433,81 +1476,144 @@ function SpaceEditor({
                 </div>
               </div>
 
-              <div className="gpt-messages" ref={gptMessagesRef}>
-                {gptHistory.length === 0 && !gptError && (
-                  <div
-                    style={{ fontSize: 12, color: 'var(--code-text)' }}
-                  >
-                    Ask GPT to help refactor your HUD or generate snippets.
-                    It will see the current file when a path is selected.
-                  </div>
-                )}
+<div className="gpt-messages" ref={gptMessagesRef}>
+  {gptHistory.length === 0 && !gptError && (
+    <div style={{ fontSize: 12, color: 'var(--code-text)' }}>
+      Ask GPT to help refactor your HUD or generate snippets.
+      It will see the current file when a path is selected.
+    </div>
+  )}
 
-                {gptHistory.map((msg, index) =>
-                  msg.role === 'assistant' ? (
-<div
-  key={index}
-  className="gpt-message gpt-message--assistant"
->
-  <div className="gpt-markdown">
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={{
-        p({ children, ...props }) {
-          return (
-            <p
-              style={{ margin: '0 0 6px', fontSize: 12 }}
-              {...props}
-            >
-              {children}
-            </p>
-          );
-        },
-        li({ children, ...props }) {
-          return (
-            <li
-              style={{ marginBottom: 4 }}
-              {...props}
-            >
-              {children}
-            </li>
-          );
-        },
-      }}
+  {gptHistory.map((msg, index) => (
+    <div
+      key={index}
+      className={`gpt-message gpt-message--${msg.role}`}
     >
-      {msg.content}
-    </ReactMarkdown>
-  </div>
+      <div className="gpt-message-avatar">
+        {msg.role === 'user' ? '👤' : '🤖'}
+      </div>
+      <div className="gpt-message-bubble">
+        <div className="gpt-message-meta">
+          {msg.role === 'user' ? 'You' : 'GPT'}
+        </div>
+        <div className="gpt-message-content">
+          {msg.role === 'assistant' ? (
+            <div className="gpt-markdown">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  p({ children, ...props }) {
+                    return (
+                      <p
+                        style={{ margin: '0 0 6px', fontSize: 12 }}
+                        {...props}
+                      >
+                        {children}
+                      </p>
+                    );
+                  },
+                  li({ children, ...props }) {
+                    return (
+                      <li
+                        style={{ marginBottom: 4 }}
+                        {...props}
+                      >
+                        {children}
+                      </li>
+                    );
+                  },
+                  code({ inline, className, children, ...props }) {
+                    const text = String(children || '');
+                    const codeText = text.replace(/\n$/, '');
+                    const match =
+                      typeof className === 'string'
+                        ? /language-(\w+)/.exec(className)
+                        : null;
+                    const langLabel = match?.[1] || 'code';
+
+                    const handleCopy = async () => {
+                      try {
+                        if (navigator.clipboard?.writeText) {
+                          await navigator.clipboard.writeText(codeText);
+                        } else {
+                          window.prompt('Copy code:', codeText);
+                        }
+                      } catch (err) {
+                        console.error('Copy failed', err);
+                      }
+                    };
+
+                    if (inline) {
+                      return (
+                        <code
+                          className="gpt-inline-code"
+                          {...props}
+                        >
+                          {children}
+                        </code>
+                      );
+                    }
+
+                    return (
+                      <div className="gpt-code-block">
+                        <div className="gpt-code-header">
+                          <span className="gpt-code-lang">
+                            {langLabel}
+                          </span>
+                          <button
+                            type="button"
+                            className="gpt-code-copy-btn"
+                            onClick={handleCopy}
+                          >
+                            Copy
+                          </button>
+                        </div>
+                        <pre className="gpt-code">
+                          <code {...props}>{children}</code>
+                        </pre>
+                      </div>
+                    );
+                  },
+                }}
+              >
+                {msg.content}
+              </ReactMarkdown>
+            </div>
+          ) : (
+            msg.content
+          )}
+        </div>
+      </div>
+    </div>
+  ))}
+
+  {gptError && (
+    <div className="gpt-message gpt-message--error">
+      <div className="gpt-message-avatar">!</div>
+      <div className="gpt-message-bubble">
+        <div className="gpt-message-meta">Error</div>
+        <div className="gpt-message-content">{gptError}</div>
+      </div>
+    </div>
+  )}
 </div>
 
-                  ) : (
-                    <div
-                      key={index}
-                      className="gpt-message gpt-message--user"
-                    >
-                      {msg.content}
-                    </div>
-                  )
-                )}
-
-                {gptError && (
-                  <div className="gpt-message gpt-message--error">
-                    {gptError}
-                  </div>
-                )}
-              </div>
 
               <div className="gpt-input">
                 <textarea
-                  placeholder={
-                    selectedPath
-                      ? 'e.g. “Add a pulsing border around the HUD”'
-                      : 'Tip: select a file so GPT can see your overlay code, then ask for changes.'
-                  }
-                  value={gptPrompt}
-                  onChange={(e) => setGptPrompt(e.target.value)}
-                  onKeyDown={handleGptKeyDown}
-                />
+                placeholder={
+                  gptBusy
+                   ? 'Waiting for GPT to respond…'
+                    : selectedPath
+                   ? 'e.g. “Add a pulsing border around the HUD”'
+                   : 'Tip: select a file so GPT can see your overlay code, then ask for changes.'
+               }
+               value={gptPrompt}
+               onChange={(e) => setGptPrompt(e.target.value)}
+               onKeyDown={handleGptKeyDown}
+               disabled={gptBusy || gptQuotaReached}
+              />
+
                 <div
                   style={{
                     display: 'flex',

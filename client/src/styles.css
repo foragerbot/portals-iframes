@@ -1,5 +1,5 @@
 :root {
-  --bg-main: #e2e2e2;
+  --bg-main: #f1eded;
   --bg-elevated: #32343b;
   --panel-border: #1f2937;
   --panel-soft: #b9bdcb;
@@ -12,8 +12,14 @@
   --text-muted: #6c7589;
   --text-light: #e2e2e2;
 
-  --button-main:#000000;
-  --button-alt: #abd4ec;
+  --button-main: #000000; /* text color on buttons */
+  --button-alt:  #abd4ec; /* default button background */
+
+  --button-primary: linear-gradient(
+    to right,
+    rgba(34, 211, 238, 0.12),
+    rgba(168, 85, 247, 0.16)
+  );
 
   --code-bg: #000000;
   --code-text: #ffffff;
@@ -27,6 +33,7 @@
   --shadow-soft: 0 0 20px rgba(34, 211, 238, 0.2);
 
   --font-main: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  
 }
 
 *,
@@ -319,6 +326,18 @@ body {
   gap: 6px;
 }
 
+/* Editor panel font-size tokens */
+.panel--editor {
+  --editor-font-size: 12px;
+  --editor-code-font-size: 12px;
+}
+
+/* GPT panel font-size tokens */
+.panel--gpt {
+  --gpt-font-size: 12px;
+  --gpt-code-font-size: 11px;
+}
+
 .files-toggle {
   display: inline-flex;
   padding: 2px;
@@ -439,10 +458,10 @@ body {
   resize: none;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
     monospace;
-  font-size: 12px;
+  font-size: var(--editor-code-font-size);
   line-height: 1.4;
-  color: var(--code-text);
-  background: var(--code-bg);
+  color: var(--text-main);
+  background: var(--bg-main);
   border-radius: 8px;
   border: 1px solid var(--panel-border);
   padding: 8px;
@@ -479,11 +498,7 @@ body {
 
 .button.primary {
   border-color: rgba(34, 211, 238, 0.8);
-  background: linear-gradient(
-    to right,
-    rgba(34, 211, 238, 0.12),
-    rgba(168, 85, 247, 0.16)
-  );
+  background: var(--button-primary);
 }
 
 .button.small {
@@ -499,32 +514,149 @@ body {
   cursor: default;
 }
 
-/* GPT panel */
-
+/* GPT panel – chat-style transcript */
 .gpt-messages {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   border-radius: 8px;
   border: 1px solid var(--panel-border);
   padding: 8px;
   background: var(--code-bg);
   font-size: 12px;
   color: var(--code-text);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .gpt-code {
-  margin: 6px 0;
+  margin: 0;
   padding: 6px 8px;
-  border-radius: 6px;
+  border-radius: 0 0 8px 8px;
   background: var(--code-bg);
-  border: 1px solid #1f2937;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
-    monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    'Liberation Mono', 'Courier New', monospace;
   white-space: pre;
   overflow-x: auto;
-  font-size: 11px;
+  font-size: var(--gpt-code-font-size);
   color: var(--text-light);
 }
+/* Wrapper around a fenced code block */
+.gpt-code-block {
+  margin: 8px 0;
+  border-radius: 8px;
+  border: 1px solid var(--accent-primary);
+  background: rgba(0, 0, 0, 0.9);
+  overflow: hidden;
+}
+
+/* Paper theme: make GPT code blocks light like the editor */
+.panel.theme-paper .gpt-code-block {
+  background: #f9fafb;           /* light code bg */
+  border-color: #cbd5e1;         /* soft gray border */
+}
+
+.panel.theme-paper .gpt-code-header {
+  background: #e5e7eb;           /* light header bar */
+  border-bottom-color: #cbd5e1;
+}
+
+.panel.theme-paper .gpt-code {
+  background: #f9fafb;
+  color: #020617;                /* dark ink */
+}
+
+.panel.theme-paper .gpt-code-lang {
+  color: #6b7280;                /* muted gray label */
+}
+
+.panel.theme-paper .gpt-code-copy-btn {
+  background: #ffffff;
+  color: #111827;
+  border-color: #cbd5e1;
+}
+
+.panel.theme-paper .gpt-code-copy-btn:hover {
+  background: #e5e7eb;
+  border-color: #22d3ee;         /* little cyan pop on hover */
+}
+
+/* Flower theme: make GPT code blocks match the soft pink/violet look */
+.panel.theme-flower .gpt-code-block {
+  background: #fdf2ff;          /* light lilac code bg */
+  border-color: #f9a8d4;        /* soft pink border */
+}
+
+.panel.theme-flower .gpt-code-header {
+  background: #fce7f3;          /* slightly deeper pink header strip */
+  border-bottom-color: #f9a8d4;
+}
+
+.panel.theme-flower .gpt-code {
+  background: #fdf2ff;
+  color: #4a044e;               /* deep plum text */
+}
+
+.panel.theme-flower .gpt-code-lang {
+  color: #a855f7;               /* violet label */
+}
+
+.panel.theme-flower .gpt-code-copy-btn {
+  background: #fff7fb;          /* very light pink button */
+  color: #4a044e;
+  border-color: #f9a8d4;
+}
+
+.panel.theme-flower .gpt-code-copy-btn:hover {
+  background: #fce7f3;
+  border-color: #ec4899;        /* coral-pink accent on hover */
+}
+
+/* Header bar above the code block */
+.gpt-code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  font-size: 10px;
+  background: rgba(15, 23, 42, 0.9);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.5);
+}
+
+.gpt-code-lang {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+/* Copy button inside the code header */
+.gpt-code-copy-btn {
+  border-radius: 999px;
+  border: 1px solid var(--panel-border);
+  background: rgba(15, 23, 42, 0.9);
+  color: var(--text-light);
+  font-size: 10px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.gpt-code-copy-btn:hover {
+  border-color: var(--accent-primary);
+  background: rgba(34, 211, 238, 0.24);
+}
+
+/* Inline code styling inside GPT messages */
+.gpt-inline-code {
+  display: inline-block;
+  padding: 0 3px;
+  border-radius: 4px;
+  background: rgba(15, 23, 42, 0.9);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    'Liberation Mono', 'Courier New', monospace;
+  font-size: 11px;
+}
+
 
 .gpt-input {
   margin-top: 8px;
@@ -540,8 +672,8 @@ body {
   resize: vertical;
   border-radius: 8px;
   border: 1px solid var(--panel-border);
-  background: var(--code-bg);
-  color: var(--code-text);
+  background: var(--bg-main);
+  color: var(--text-main);
   font-size: 12px;
   padding: 6px 8px;
   outline: none;
@@ -552,8 +684,108 @@ body {
 }
 
 .gpt-input textarea::placeholder {
- color:var(--code-text);
+ color:var(--text-main);
 }
+
+/* GPT chat messages */
+
+.gpt-message {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.gpt-message-avatar {
+  flex: 0 0 24px;       /* fixed avatar width */
+  height: 24px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  background: var(--bg-elevated);
+  color: var(--accent-primary);
+  box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.5);
+}
+
+.gpt-message-bubble {
+  flex: 1 1 auto;       /* take remaining width */
+  min-width: 0;         /* allow shrinking instead of forcing overflow */
+  max-width: 100%;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid var(--panel-border);
+}
+
+/* User vs GPT bubbles */
+.gpt-message--user .gpt-message-bubble {
+  background: rgba(34, 211, 238, 0.16);
+  border-color: rgba(34, 211, 238, 0.7);
+  color: var(--text-light);
+}
+
+.gpt-message--assistant .gpt-message-bubble {
+  background: transparent;
+  border-color: var(--panel-border);
+}
+
+/* Error messages */
+.gpt-message--error .gpt-message-avatar {
+  background: var(--danger);
+  color: #fff;
+  box-shadow: none;
+}
+
+.gpt-message--error .gpt-message-bubble {
+  background: rgba(249, 115, 115, 0.14);
+  border-color: rgba(249, 115, 115, 0.8);
+  color: var(--text-light);
+}
+
+/* Metadata & content inside bubbles */
+.gpt-message-meta {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+
+.gpt-message-content {
+  font-size: var(--gpt-font-size);
+  color: var(--code-text);
+}
+
+/* Let markdown inside GPT bubbles inherit nicely */
+.gpt-message-content .gpt-markdown {
+  font-size: 12px;
+}
+
+.gpt-message-content .gpt-markdown p {
+  margin: 0 0 6px;
+}
+
+.gpt-message-content .gpt-markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    'Liberation Mono', 'Courier New', monospace;
+}
+
+.gpt-input textarea:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.gpt-message,
+.gpt-message-bubble,
+.gpt-message-content,
+.gpt-markdown {
+  max-width: 100%;
+}
+
 
 /* Usage chip */
 
@@ -903,37 +1135,99 @@ body {
 
 /* Theme: Paper – light editor with soft code bg */
 .panel.theme-paper {
-  --bg-main: #ffffff;
-  --code-bg: #f9fafb;
+  /* panel + code backgrounds */
+  --bg-main: #ffffff;      /* panel/card background */
+  --code-bg: #f9fafb;      /* editor / GPT code area */
+
+  /* text */
   --code-text: #020617;
   --text-main: #020617;
   --text-muted: #6b7280;
-  --panel-border: #cbd5e1;
+
+  /* borders / structure */
+  --panel-border: #d1d5db; /* soft gray border, not too heavy */
+
+  /* accents (reuse your brand-ish colors but slightly calmer on white) */
+  --accent-primary: #22d3ee;  /* cyan line/highlight */
+  --accent-secondary: #a855f7;
+
+  /* buttons inside Paper panels */
+  --button-alt: #f3f4f6;   /* default button bg */
+  --button-main: #111827;  /* button text */
 }
 
-/* Theme: Ocean – deep blue / teal vibes */
+/* Ocean C: neon reef */
 .panel.theme-ocean {
-  --bg-main: #021b2e;
-  --code-bg: #020817;
-  --code-text: #e0f2fe;
-  --text-main: #e0f2fe;
-  --text-muted: #7dd3fc;
-  --panel-border: #0ea5e9;
-  --accent-primary: #22d3ee;
-  --accent-secondary: #38bdf8;
+  --bg-main: #0e2073;        /* panel background */
+  --code-bg: #000814;        /* code / chat bg */
+  --code-text: #f9fafb;
+  --text-main: #e5e7eb;
+  --text-muted: #9ca3af;
+  --panel-border: #fb7185;   /* warm coral border */
+  --accent-primary: #fb7185; /* coral */
+  --accent-secondary: #22d3ee; /* cyan pop */
+  --button-alt: #081427;     /* pill background */
+  --button-main: #f9fafb;    /* pill text */
 }
+
 
 /* Theme: Flower – soft pink / violet */
 .panel.theme-flower {
   --bg-main: #fff7fb;
   --code-bg: #fdf2ff;
-  --code-text: #4a044e;
+  --code-text: #000000;
   --text-main: #4a044e;
   --text-muted: #a855f7;
   --panel-border: #f9a8d4;
   --accent-primary: #ec4899;
   --accent-secondary: #a855f7;
 }
+
+/* Theme: Default – neutral light */
+.panel.theme-default {
+  --bg-main: #ffffff;
+  --code-bg: #f9fafb;
+  --code-text: #020617;
+  --text-main: #020617;
+  --text-muted: #6b7280;
+  --panel-border: #d1d5db;
+  --accent-primary: #22d3ee;
+  --accent-secondary: #a855f7;
+  --button-alt: #f3f4f6;
+  --button-main: #111827;
+}
+
+/* Default theme: make GPT code blocks light like the editor */
+.panel.theme-default .gpt-code-block {
+  background: #f9fafb;          /* light code bg */
+  border-color: #d1d5db;        /* neutral gray border */
+}
+
+.panel.theme-default .gpt-code-header {
+  background: #e5e7eb;          /* light header strip */
+  border-bottom-color: #d1d5db;
+}
+
+.panel.theme-default .gpt-code {
+  background: #f9fafb;
+  color: #020617;               /* dark ink, like the editor textarea */
+}
+
+.panel.theme-default .gpt-code-lang {
+  color: #6b7280;               /* muted gray label */
+}
+
+.panel.theme-default .gpt-code-copy-btn {
+  background: #ffffff;
+  color: #111827;
+  border-color: #d1d5db;
+}
+
+.panel.theme-default .gpt-code-copy-btn:hover {
+  background: #e5e7eb;
+  border-color: #22d3ee;        /* little cyan pop on hover */
+}
+
 
 /* Responsive: stack vertically on narrower viewports */
 @media (max-width: 1024px) {
