@@ -1,12 +1,10 @@
 // server/index.js
 import express from 'express';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
-import dotenv from 'dotenv';
 import fs from 'fs/promises';
 import fsSync from 'fs';
 import crypto from 'crypto';
@@ -14,55 +12,42 @@ import OpenAI from 'openai';
 import multer from 'multer';
 import rateLimit from 'express-rate-limit';
 import sgMail from '@sendgrid/mail';
+import {
+  PORT,
+  LISTEN_HOST,
+  NODE_ENV,
+  IS_PROD,
+  ADMIN_TOKEN,
+  APP_BASE_URL,
+  PUBLIC_IFRAME_BASE_URL,
+  SPACES_ROOT,
+  SPACES_META_PATH,
+  USERS_META_PATH,
+  TOKENS_META_PATH,
+  SESSIONS_META_PATH,
+  APPROVED_USERS_PATH,
+  WORKSPACE_REQUESTS_PATH,
+  PORTALS_NOTES_PATH,
+  PORTALS_SDK_SOURCE_PATH,
+  SENDGRID_API_KEY,
+  SENDGRID_FROM,
+  WORKSPACE_ADMIN_EMAIL,
+  OPENAI_API_KEY,
+  DEFAULT_GPT_MODEL,
+  ALLOWED_GPT_MODELS,
+  MAX_ASSET_FILE_SIZE,
+  MAX_ASSET_FILES,
+  GPT_MAX_CALLS_PER_DAY,
+  GPT_RATE_WINDOW_MS,
+  GPT_RATE_MAX_PER_WINDOW,
+  TRUST_PROXY,
+  PORTALS_FRAME_ANCESTORS,
+} from './config.js';
+
+import { readJsonArray, writeJsonArray } from './stores/jsonStore.js';
 
 
-// Load env vars from .env (if present)
-dotenv.config();
-
-// __dirname shim for ES modules
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Basic config
-const PORT = process.env.PORT || 4100;
-const NODE_ENV = process.env.NODE_ENV || 'development';
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || null;
-const APP_BASE_URL =
-  process.env.APP_BASE_URL || `http://localhost:${PORT || 4100}`;
-const IS_PROD = NODE_ENV === 'production';
-
-// Root of repo
-const ROOT_DIR = path.join(__dirname, '..');
-
-// Where user spaces (per-tenant dirs) will live
-const SPACES_ROOT = path.join(ROOT_DIR, 'spaces');
-
-// Simple metadata files
-const SPACES_META_PATH = path.join(ROOT_DIR, 'spaces.meta.json');
-const USERS_META_PATH = path.join(ROOT_DIR, 'users.meta.json');
-const TOKENS_META_PATH = path.join(ROOT_DIR, 'magicTokens.meta.json');
-const SESSIONS_META_PATH = path.join(ROOT_DIR, 'sessions.meta.json');
-const APPROVED_USERS_PATH = path.join(ROOT_DIR, 'approvedUsers.meta.json');
-const WORKSPACE_REQUESTS_PATH = path.join(ROOT_DIR, 'workspaceRequests.meta.json');
-
-// OpenAI client
-const openai = process.env.OPENAI_API_KEY
-  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
-  : null;
-
-// Cheap-but-capable default model
-const DEFAULT_GPT_MODEL = process.env.OPENAI_DEFAULT_MODEL || 'gpt-4.1-mini';
-
-// Limit to a small safe set so someone can't accidentally slam GPT-5.2 pro
-const ALLOWED_GPT_MODELS = [
-  'gpt-4.1-mini',
-  'gpt-4.1-nano',
-  'gpt-4o-mini'
-];
-
-// Upload limits
-const MAX_ASSET_FILE_SIZE = 10 * 1024 * 1024; // 10 MB per file
-const MAX_ASSET_FILES = 10;                   // max files per upload
+const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
 // Multer setup for in-memory uploads (we write to disk ourselves)
 const upload = multer({
@@ -72,12 +57,6 @@ const upload = multer({
     files: MAX_ASSET_FILES,
   },
 });
-
-const GPT_MAX_CALLS_PER_DAY = Number(process.env.GPT_MAX_CALLS_PER_DAY || 200);
-const GPT_RATE_WINDOW_MS = Number(process.env.GPT_RATE_WINDOW_MS || 60_000);
-const GPT_RATE_MAX_PER_WINDOW = Number(
-  process.env.GPT_RATE_MAX_PER_WINDOW || 10
-);
 
 // Basic per-IP rate limiter for GPT endpoint
 const gptRateLimiter = rateLimit({
@@ -93,8 +72,18 @@ const gptRateLimiter = rateLimit({
   },
 });
 
-const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || null;
-const SENDGRID_FROM = process.env.SENDGRID_FROM || null;
+const magicLinkRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 min
+  max: 4,                   // per IP per window (tune as desired)
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    return res.status(429).json({
+      error: 'rate_limited',
+      message: 'Too many login links requested. Please wait and try again.',
+    });
+  },
+});
 
 if (SENDGRID_API_KEY && SENDGRID_FROM) {
   sgMail.setApiKey(SENDGRID_API_KEY);
@@ -102,9 +91,7 @@ if (SENDGRID_API_KEY && SENDGRID_FROM) {
 } else {
   console.log('[mail] SendGrid not fully configured (missing key or from address)');
 }
-const WORKSPACE_ADMIN_EMAIL = process.env.WORKSPACE_ADMIN_EMAIL || null;
 
-const PORTALS_NOTES_PATH = path.join(ROOT_DIR, 'docs', 'portals-sdk-notes.md');
 let portalsMarkdownCache = null;
 
 async function getPortalsMarkdown() {
@@ -137,27 +124,14 @@ function generateId(prefix = '') {
   return prefix + crypto.randomBytes(16).toString('hex');
 }
 
-
-async function readJsonArray(filePath) {
+function redactMagicTokenFromUrl(url) {
   try {
-    if (!fsSync.existsSync(filePath)) return [];
-    const raw = await fs.readFile(filePath, 'utf8');
-    if (!raw.trim()) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (err) {
-    console.error('[meta] failed to read', filePath, err);
-    return [];
-  }
-}
-
-async function writeJsonArray(filePath, arr) {
-  try {
-    const json = JSON.stringify(arr, null, 2);
-    await fs.writeFile(filePath, json, 'utf8');
-  } catch (err) {
-    console.error('[meta] failed to write', filePath, err);
-    throw err;
+    const u = new URL(url);
+    if (u.searchParams.has('token')) u.searchParams.set('token', '[redacted]');
+    return u.toString();
+  } catch {
+    // fallback: cheap redaction
+    return String(url).replace(/token=([^&]+)/, 'token=[redacted]');
   }
 }
 
@@ -411,7 +385,7 @@ function portalsEmbedHeaders(req, res, next) {
   res.removeHeader('X-Frame-Options');
 
   // Configure via env so you can tune without code deploy
-  const ancestors = (process.env.PORTALS_FRAME_ANCESTORS || '').trim();
+const ancestors = PORTALS_FRAME_ANCESTORS;
 
   // If you don't know the Portals hostnames yet, start permissive, tighten later
   const frameAncestors = ancestors || '*';
@@ -426,9 +400,10 @@ function portalsEmbedHeaders(req, res, next) {
 async function sendMagicLinkEmail(email, url) {
   // If SendGrid isn't configured, fall back to dev-mode logging
   if (!SENDGRID_API_KEY || !SENDGRID_FROM) {
-    console.log(
-      `[magic-link] dev mode: would send to ${email}: ${url}`
-    );
+console.log(
+  `[magic-link] dev mode: would send to ${email}: ${NODE_ENV === 'development' ? url : redactMagicTokenFromUrl(url)}`
+);
+
     return;
   }
 
@@ -611,10 +586,11 @@ async function sendWorkspaceApprovalEmailToUser(user, spaceRecord, requestRecord
     });
     return;
   }
-
   const appBase = APP_BASE_URL.replace(/\/+$/, '');
   const appUrl = `${appBase}/`;
-  const iframeUrl = `${appBase}/p/${encodeURIComponent(spaceRecord.slug)}/index.html`;
+
+  const publicBase = PUBLIC_IFRAME_BASE_URL.replace(/\/+$/, '');
+  const iframeUrl = `${publicBase}/p/${encodeURIComponent(spaceRecord.slug)}/index.html`;
 
   const subject = `Your Portals iFrame workspace "${spaceRecord.slug}" is ready`;
   const textLines = [
@@ -736,7 +712,7 @@ function requireAdmin(req, res, next) {
       .json({ error: 'unauthorized', reason: 'no_token' });
   }
   if (token !== ADMIN_TOKEN) {
-    console.log('[admin] bad admin token:', token);
+    console.log('[admin] bad admin token:');
     return res
       .status(401)
       .json({ error: 'unauthorized', reason: 'bad_token' });
@@ -758,9 +734,10 @@ function requireUser(req, res, next) {
 
 // ───────────────── Middlewares ─────────────────
 // Trust proxy if you’re behind Nginx later
-if (process.env.TRUST_PROXY === '1') {
+if (TRUST_PROXY) {
   app.set('trust proxy', true);
 }
+
 
 // JSON + urlencoded body parsing
 app.use(express.json({ limit: '2mb' }));
@@ -793,6 +770,7 @@ const ALLOWED_ORIGINS = [
 ];
 
 app.use(
+  '/api',
   cors({
     origin(origin, cb) {
       // Allow non-browser / same-origin calls (curl, health checks, etc.)
@@ -808,6 +786,7 @@ app.use(
     credentials: true,
   })
 );
+
 
 // Logs
 if (NODE_ENV === 'development') {
@@ -837,7 +816,7 @@ app.get('/api/version', (req, res) => {
 
 // ───────────────── Magic-link auth ─────────────────
 // Start magic link: POST /api/auth/magic/start { email }
-app.post('/api/auth/magic/start', async (req, res, next) => {
+app.post('/api/auth/magic/start', magicLinkRateLimiter, async (req, res, next) => {
   try {
     const { email } = req.body || {};
     const normalizedEmail = (email || '').trim().toLowerCase();
@@ -879,9 +858,7 @@ app.post('/api/auth/magic/start', async (req, res, next) => {
 
     await sendMagicLinkEmail(normalizedEmail, verifyUrl);
 
-    console.log(
-      `[auth] magic link created for ${normalizedEmail}, token ${token}`
-    );
+    console.log(`[auth] magic link created for ${normalizedEmail}`);
 
     res.json({ ok: true });
   } catch (err) {
@@ -891,6 +868,7 @@ app.post('/api/auth/magic/start', async (req, res, next) => {
 
 // Verify magic link: GET /api/auth/magic/verify?token=...
 app.get('/api/auth/magic/verify', async (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
   try {
     const { token, redirect } = req.query || {};
     const wantsRedirect = redirect === '1';
@@ -1201,10 +1179,53 @@ app.post('/api/spaces/:slug/file', requireUser, requireEditorOrigin, async (req,
     // Ensure parent directories exist
     const dirName = path.dirname(filePath);
     await fs.mkdir(dirName, { recursive: true });
+    // ── Enforce quota on editor saves too (not just uploads)
+    const quotaMb = Number.isFinite(Number(space.quotaMb))
+      ? Number(space.quotaMb)
+      : 100;
+    const quotaBytes = quotaMb * 1024 * 1024;
+
+    // Current usage on disk
+    let currentBytes = 0;
+    try {
+      currentBytes = await getDirSizeBytes(space.dirPath);
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+      currentBytes = 0;
+    }
+
+    // If overwriting an existing file, subtract its current size
+    let existingBytes = 0;
+    try {
+      existingBytes = (await fs.stat(filePath)).size;
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+      existingBytes = 0;
+    }
+
+    const newBytes = Buffer.byteLength(content, 'utf8');
+    const projectedBytes = Math.max(0, currentBytes - existingBytes) + newBytes;
+
+    if (projectedBytes > quotaBytes) {
+      const deltaBytes = newBytes - existingBytes;
+
+      return res.status(413).json({
+        error: 'quota_exceeded',
+        message: `Save would exceed quota of ${quotaMb} MB`,
+        quotaMb,
+        currentMb: +(currentBytes / (1024 * 1024)).toFixed(2),
+        deltaMb: +(deltaBytes / (1024 * 1024)).toFixed(2),
+      });
+    }
 
     await fs.writeFile(filePath, content, 'utf8');
 
-    // TODO: update stored quota if/when we track it per write
+    // Keep meta in sync (best-effort)
+    try {
+      await updateSpaceSizeBytes(space, projectedBytes);
+    } catch (err) {
+      console.warn('[spaces] failed to update size meta after save:', err.message);
+    }
 
     res.json({
       ok: true,
@@ -1343,11 +1364,6 @@ app.post('/api/spaces/:slug/file/rename', requireUser, requireEditorOrigin, asyn
     next(err);
   }
 });
-
-// Official Portals SDK source (production)
-const PORTALS_SDK_SOURCE_PATH =
-  process.env.PORTALS_SDK_SOURCE_PATH ||
-  path.join(ROOT_DIR, 'sdk', 'portals-sdk.js');
 
 let portalsSdkSourceCache = { text: '', mtimeMs: 0 };
 
@@ -1799,8 +1815,14 @@ app.post(
       const saved = [];
 
       // Actually write the files
-      for (const f of files) {
-        const filename = f.originalname;
+        for (const f of files) {
+          const rawName = String(f.originalname || '');
+          const filename = path.posix.basename(rawName.replace(/\\/g, '/'));
+
+          if (!filename) {
+            return res.status(400).json({ error: 'bad_filename' });
+          }
+
         const relPath = subdir ? `${subdir}/${filename}` : filename;
         const destPath = resolveSpacePath(space, relPath);
 
@@ -2502,17 +2524,23 @@ app.use((req, res) => {
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   console.error('[error]', err);
+
   const status = err.status || 500;
-  res.status(status).json({
-    error: err.message || 'server_error',
-  });
+
+  // In prod, don't leak internal error strings to clients
+  const safeMessage =
+    NODE_ENV === 'production'
+      ? (status >= 500 ? 'server_error' : (err.message || 'error'))
+      : (err.message || 'server_error');
+
+  res.status(status).json({ error: safeMessage });
 });
 
 // ───────────────── Start server ─────────────────
 
 ensureSpacesRoot()
   .then(() => {
-    app.listen(PORT, () => {
+    app.listen(PORT, LISTEN_HOST, () => {
       console.log(
         `[portals-iframes] listening on port ${PORT} (${NODE_ENV})`
       );

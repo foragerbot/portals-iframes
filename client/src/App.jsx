@@ -89,7 +89,7 @@ function LoginPage() {
     setStatus('');
     try {
       await startMagicLink(email);
-      setStatus('Magic link sent. Check your email and click the link to sign in.');
+      setStatus('Magic link sent. Check your email and click the link to sign in (opens a new window or tab).');
     } catch (err) {
       console.error(err);
       setStatus(err.payload?.message || 'Failed to send magic link.');
@@ -103,7 +103,10 @@ function LoginPage() {
       <div className="login-card">
         <h1>Sign in to Portals iFrame Builder</h1>
         <p>
-          Enter your email where we can send a login link. Click the link in the email to open your iFrame builder workspace.
+          First-time users: Enter the email where you want to receive a login link. Click the link in the email to initiative your iFrame builder workspace.
+        </p>
+        <p>
+          Returning users: Re-enter your email to access your saved workspaces. Login link will be sent to your email.
         </p>
         <form onSubmit={onSubmit}>
           <input

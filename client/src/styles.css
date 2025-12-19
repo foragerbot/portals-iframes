@@ -1049,7 +1049,7 @@ body {
 
 .login-status {
   font-size: 11px;
-  color: var(--text-light);
+  color: var(--text-main);
   min-height: 14px;
 }
 
