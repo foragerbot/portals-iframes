@@ -1,6 +1,6 @@
 //client/src/App.jsx
 
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { Routes, Route, useNavigate, useLocation, Navigate } from 'react-router-dom';
 import {
   getMe,
@@ -711,11 +711,16 @@ function SpaceEditor({
   const [previewReloadKey, setPreviewReloadKey] = useState(0);
 
   const bothCodePanels = showEditor && showGpt;
+
+  // Per-panel font sizes
   const [editorFontSize, setEditorFontSize] = useState(12);
   const [gptFontSize, setGptFontSize] = useState(12);
 
+  // Editor overlay refs
+  const editorTextareaRef = useRef(null);
+  const editorHighlightRef = useRef(null);
 
-  // themes
+  // Themes
   const [editorTheme, setEditorTheme] = useState(() => {
     if (typeof window === 'undefined') return 'default';
     return localStorage.getItem('editorTheme') || 'default';
@@ -794,7 +799,8 @@ function SpaceEditor({
       e.returnValue = '';
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+    return () =>
+      window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [hasUnsavedChanges]);
 
   // Report dirty state up to DashboardPage
@@ -815,6 +821,16 @@ function SpaceEditor({
     setGptHistory([]);
     setGptError(null);
     setGptMeta({ model: null, sdkIncluded: false, truncated: false });
+
+    // reset editor scroll
+    const ta = editorTextareaRef.current;
+    const pre = editorHighlightRef.current;
+    if (ta && pre) {
+      ta.scrollTop = 0;
+      ta.scrollLeft = 0;
+      pre.scrollTop = 0;
+      pre.scrollLeft = 0;
+    }
   };
 
   const onSave = async () => {
@@ -957,92 +973,89 @@ function SpaceEditor({
 
   // GPT quota info from usage
   const gptUsage = usage?.gptUsage || null;
-  const gptCalls = typeof gptUsage?.calls === 'number' ? gptUsage.calls : 0;
+  const gptCalls =
+    typeof gptUsage?.calls === 'number' ? gptUsage.calls : 0;
   const gptDailyLimit =
     typeof gptUsage?.dailyLimit === 'number' ? gptUsage.dailyLimit : null;
   const gptQuotaReached =
     gptDailyLimit !== null && gptCalls >= gptDailyLimit;
 
   const onRunGpt = async () => {
-  if (!gptPrompt.trim() || gptQuotaReached || gptBusy) return;
+    if (!gptPrompt.trim() || gptQuotaReached || gptBusy) return;
 
-  const promptText = gptPrompt.trim();
-  const historyToSend = gptHistory.slice(-10); // prior turns only
+    const promptText = gptPrompt.trim();
+    const historyToSend = gptHistory.slice(-10);
 
-  setGptBusy(true);
-  setGptError(null);
-  setGptPrompt(''); // clear textarea immediately
+    setGptBusy(true);
+    setGptError(null);
+    setGptPrompt(''); // clear input immediately
 
-  // Optimistically append the user message to the chat
-  setGptHistory((prev) => {
-    const next = [...prev, { role: 'user', content: promptText }];
-    return next.slice(-50);
-  });
-
-  try {
-    const data = await callSpaceGpt(slug, {
-      prompt: promptText,
-      filePath: selectedPath || undefined,
-      fileContent: fileContent || '',
-      messages: historyToSend,
-    });
-
-    const content = data.message?.content || '';
-
-    // Append GPT reply
+    // Optimistic user message
     setGptHistory((prev) => {
-      const next = [...prev, { role: 'assistant', content }];
+      const next = [...prev, { role: 'user', content: promptText }];
       return next.slice(-50);
     });
 
-    setGptMeta({
-      model: data.model,
-      sdkIncluded: !!data.sdkIncluded,
-      truncated: !!data.fileContextTruncated,
-    });
+    try {
+      const data = await callSpaceGpt(slug, {
+        prompt: promptText,
+        filePath: selectedPath || undefined,
+        fileContent: fileContent || '',
+        messages: historyToSend,
+      });
 
-    setGptError(null);
-    onUsageRefresh?.();
-  } catch (err) {
-    console.error(err);
-    const status = err.status;
-    const code = err.payload?.error;
+      const content = data.message?.content || '';
 
-    let message =
-      err.payload?.message || 'GPT request failed.';
+      setGptHistory((prev) => {
+        const next = [...prev, { role: 'assistant', content }];
+        return next.slice(-50);
+      });
 
-    if (status === 429 && code === 'gpt_quota_exceeded') {
-      message =
-        err.payload?.message ||
-        'Daily GPT limit reached for this account.';
-    } else if (status === 429 && code === 'rate_limited') {
-      message =
-        err.payload?.message ||
-        'Too many GPT requests. Try again in a moment.';
-    } else if (status === 503 && code === 'gpt_disabled') {
-      message =
-        'GPT is disabled on this server (no API key configured).';
+      setGptMeta({
+        model: data.model,
+        sdkIncluded: !!data.sdkIncluded,
+        truncated: !!data.fileContextTruncated,
+      });
+
+      setGptError(null);
+      onUsageRefresh?.();
+    } catch (err) {
+      console.error(err);
+      const status = err.status;
+      const code = err.payload?.error;
+
+      let message = err.payload?.message || 'GPT request failed.';
+
+      if (status === 429 && code === 'gpt_quota_exceeded') {
+        message =
+          err.payload?.message ||
+          'Daily GPT limit reached for this account.';
+      } else if (status === 429 && code === 'rate_limited') {
+        message =
+          err.payload?.message ||
+          'Too many GPT requests. Try again in a moment.';
+      } else if (status === 503 && code === 'gpt_disabled') {
+        message =
+          'GPT is disabled on this server (no API key configured).';
+      }
+
+      setGptError(message);
+    } finally {
+      setGptBusy(false);
     }
+  };
 
-    setGptError(message);
-  } finally {
-    setGptBusy(false);
-  }
-};
-
-
-const handleGptKeyDown = (e) => {
-  if (e.key === 'Enter') {
-    if (e.altKey || e.shiftKey || e.metaKey || e.ctrlKey) {
-      return; // newline
+  const handleGptKeyDown = (e) => {
+    if (e.key === 'Enter') {
+      if (e.altKey || e.shiftKey || e.metaKey || e.ctrlKey) {
+        return; // newline
+      }
+      e.preventDefault();
+      if (!gptBusy && !gptQuotaReached && gptPrompt.trim()) {
+        onRunGpt();
+      }
     }
-    e.preventDefault();
-    if (!gptBusy && !gptQuotaReached && gptPrompt.trim()) {
-      onRunGpt();
-    }
-  }
-};
-
+  };
 
   function inferPreferredLangFromPath(filePath) {
     const p = String(filePath || '').toLowerCase();
@@ -1052,6 +1065,30 @@ const handleGptKeyDown = (e) => {
     if (p.endsWith('.js') || p.endsWith('.mjs')) return 'javascript';
     return 'text';
   }
+
+  // Editor language + highlighted HTML
+  const editorLang = inferPreferredLangFromPath(selectedPath);
+
+  const highlightedEditorHtml = useMemo(() => {
+    const codeText = fileContent || '';
+
+    try {
+      if (editorLang && hljs.getLanguage(editorLang)) {
+        return hljs.highlight(codeText, { language: editorLang }).value;
+      }
+      return hljs.highlightAuto(codeText).value;
+    } catch (err) {
+      console.error('highlight.js (editor) error', err);
+      return codeText;
+    }
+  }, [fileContent, editorLang]);
+
+  const handleEditorScroll = (e) => {
+    const pre = editorHighlightRef.current;
+    if (!pre) return;
+    pre.scrollTop = e.target.scrollTop;
+    pre.scrollLeft = e.target.scrollLeft;
+  };
 
   const getLastAssistantContent = useCallback(() => {
     for (let i = gptHistory.length - 1; i >= 0; i -= 1) {
@@ -1213,7 +1250,6 @@ const handleGptKeyDown = (e) => {
                       Assets
                     </button>
                   </div>
-
                 </div>
               </div>
 
@@ -1293,7 +1329,7 @@ const handleGptKeyDown = (e) => {
               className={`panel panel--editor theme-${editorTheme} ${
                 bothCodePanels ? 'panel--editor-half' : ''
               }`}
-               style={{ '--editor-code-font-size': `${editorFontSize}px` }}
+              style={{ '--editor-code-font-size': `${editorFontSize}px` }}
             >
               <div className="panel-header">
                 <div className="panel-header-left">
@@ -1319,23 +1355,27 @@ const handleGptKeyDown = (e) => {
                     )}
                   </div>
                 </div>
-                <div className="font-size-controls">
-    <button
-      type="button"
-      className="button small"
-      onClick={() => setEditorFontSize((s) => Math.max(10, s - 1))}
-    >
-      A-
-    </button>
-    <button
-      type="button"
-      className="button small"
-      onClick={() => setEditorFontSize((s) => Math.min(18, s + 1))}
-    >
-      A+
-    </button>
-  </div>
-                <div>
+                <div className="panel-header-right">
+                  <div className="font-size-controls">
+                    <button
+                      type="button"
+                      className="button small"
+                      onClick={() =>
+                        setEditorFontSize((s) => Math.max(10, s - 1))
+                      }
+                    >
+                      A-
+                    </button>
+                    <button
+                      type="button"
+                      className="button small"
+                      onClick={() =>
+                        setEditorFontSize((s) => Math.min(18, s + 1))
+                      }
+                    >
+                      A+
+                    </button>
+                  </div>
                   <select
                     className="theme-select"
                     value={editorTheme}
@@ -1356,15 +1396,32 @@ const handleGptKeyDown = (e) => {
                 </div>
               ) : (
                 <>
-                  <textarea
-                    className="editor-textarea"
-                    value={fileContent}
-                    onChange={(e) => {
-                      setFileContent(e.target.value);
-                      setHasUnsavedChanges(true);
-                    }}
-                    spellCheck={false}
-                  />
+                  <div className="editor-code-shell">
+                    <pre
+                      className="editor-highlight"
+                      ref={editorHighlightRef}
+                    >
+                      <code
+                        className={`hljs language-${editorLang || 'text'}`}
+                        dangerouslySetInnerHTML={{
+                          __html: highlightedEditorHtml,
+                        }}
+                      />
+                    </pre>
+
+                    <textarea
+                      ref={editorTextareaRef}
+                      className="editor-textarea"
+                      value={fileContent}
+                      onChange={(e) => {
+                        setFileContent(e.target.value);
+                        setHasUnsavedChanges(true);
+                      }}
+                      onScroll={handleEditorScroll}
+                      spellCheck={false}
+                    />
+                  </div>
+
                   <div className="editor-actions">
                     <div style={{ display: 'flex', gap: 8 }}>
                       <button
@@ -1436,11 +1493,19 @@ const handleGptKeyDown = (e) => {
           {showGpt && (
             <div
               className={`panel panel--gpt theme-${gptTheme} ${
-                !showEditor ? 'panel--gpt-full' : bothCodePanels ? 'panel--gpt-half' : '' }`}
-                    style={{
-                   '--gpt-font-size': `${gptFontSize}px`,
-                   '--gpt-code-font-size': `${Math.max(10, gptFontSize - 1)}px`,
-               }}
+                !showEditor
+                  ? 'panel--gpt-full'
+                  : bothCodePanels
+                  ? 'panel--gpt-half'
+                  : ''
+              }`}
+              style={{
+                '--gpt-font-size': `${gptFontSize}px`,
+                '--gpt-code-font-size': `${Math.max(
+                  10,
+                  gptFontSize - 1
+                )}px`,
+              }}
             >
               <div className="panel-header">
                 <div className="panel-header-left">
@@ -1460,23 +1525,27 @@ const handleGptKeyDown = (e) => {
                     )}
                   </div>
                 </div>
-    <div className="font-size-controls">
-      <button
-        type="button"
-        className="button small"
-        onClick={() => setGptFontSize((s) => Math.max(10, s - 1))}
-      >
-        A-
-      </button>
-      <button
-        type="button"
-        className="button small"
-        onClick={() => setGptFontSize((s) => Math.min(18, s + 1))}
-      >
-        A+
-      </button>
-    </div>
-                <div>
+                <div className="panel-header-right">
+                  <div className="font-size-controls">
+                    <button
+                      type="button"
+                      className="button small"
+                      onClick={() =>
+                        setGptFontSize((s) => Math.max(10, s - 1))
+                      }
+                    >
+                      A-
+                    </button>
+                    <button
+                      type="button"
+                      className="button small"
+                      onClick={() =>
+                        setGptFontSize((s) => Math.min(18, s + 1))
+                      }
+                    >
+                      A+
+                    </button>
+                  </div>
                   <select
                     className="theme-select"
                     value={gptTheme}
@@ -1491,161 +1560,203 @@ const handleGptKeyDown = (e) => {
                 </div>
               </div>
 
-<div className="gpt-messages" ref={gptMessagesRef}>
-  {gptHistory.length === 0 && !gptError && (
-    <div style={{ fontSize: 12, color: 'var(--code-text)' }}>
-      Ask GPT to help refactor your HUD or generate snippets.
-      It will see the current file when a path is selected.
-    </div>
-  )}
+              <div className="gpt-messages" ref={gptMessagesRef}>
+                {gptHistory.length === 0 && !gptError && (
+                  <div
+                    style={{ fontSize: 12, color: 'var(--code-text)' }}
+                  >
+                    Ask GPT to help refactor your HUD or generate snippets.
+                    It will see the current file when a path is selected.
+                  </div>
+                )}
 
-  {gptHistory.map((msg, index) => (
-    <div
-      key={index}
-      className={`gpt-message gpt-message--${msg.role}`}
-    >
-      <div className="gpt-message-avatar">
-        {msg.role === 'user' ? '👤' : '🤖'}
-      </div>
-      <div className="gpt-message-bubble">
-        <div className="gpt-message-meta">
-          {msg.role === 'user' ? 'You' : 'GPT'}
-        </div>
-        <div className="gpt-message-content">
-          {msg.role === 'assistant' ? (
-            <div className="gpt-markdown">
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                components={{
-                  p({ children, ...props }) {
-                    return (
-                      <p
-                        style={{ margin: '0 0 6px', fontSize: 12 }}
-                        {...props}
-                      >
-                        {children}
-                      </p>
-                    );
-                  },
-                  li({ children, ...props }) {
-                    return (
-                      <li
-                        style={{ marginBottom: 4 }}
-                        {...props}
-                      >
-                        {children}
-                      </li>
-                    );
-                  },
-code({ inline, className, children, ...props }) {
-  const text = String(children || '');
-  const codeText = text.replace(/\n$/, '');
+                {gptHistory.map((msg, index) => (
+                  <div
+                    key={index}
+                    className={`gpt-message gpt-message--${msg.role}`}
+                  >
+                    <div className="gpt-message-avatar">
+                      {msg.role === 'user' ? '👤' : '🤖'}
+                    </div>
+                    <div className="gpt-message-bubble">
+                      <div className="gpt-message-meta">
+                        {msg.role === 'user' ? 'You' : 'GPT'}
+                      </div>
+                      <div className="gpt-message-content">
+                        {msg.role === 'assistant' ? (
+                          <div className="gpt-markdown">
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm]}
+                              components={{
+                                p({ children, ...props }) {
+                                  return (
+                                    <p
+                                      style={{
+                                        margin: '0 0 6px',
+                                        fontSize: 12,
+                                      }}
+                                      {...props}
+                                    >
+                                      {children}
+                                    </p>
+                                  );
+                                },
+                                li({ children, ...props }) {
+                                  return (
+                                    <li
+                                      style={{ marginBottom: 4 }}
+                                      {...props}
+                                    >
+                                      {children}
+                                    </li>
+                                  );
+                                },
+                                code({
+                                  inline,
+                                  className,
+                                  children,
+                                  ...props
+                                }) {
+                                  const text = String(children || '');
+                                  const codeText =
+                                    text.replace(/\n$/, '');
 
-  // language-js → "js" etc
-  const match =
-    typeof className === 'string'
-      ? /language-(\w+)/.exec(className)
-      : null;
-  const lang = match?.[1]?.toLowerCase();
+                                  const match =
+                                    typeof className === 'string'
+                                      ? /language-(\w+)/.exec(
+                                          className
+                                        )
+                                      : null;
+                                  const lang =
+                                    match?.[1]?.toLowerCase();
 
-  const handleCopy = async () => {
-    try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(codeText);
-      } else {
-        window.prompt('Copy code:', codeText);
-      }
-    } catch (err) {
-      console.error('Copy failed', err);
-    }
-  };
+                                  const handleCopy = async () => {
+                                    try {
+                                      if (
+                                        navigator.clipboard?.writeText
+                                      ) {
+                                        await navigator.clipboard.writeText(
+                                          codeText
+                                        );
+                                      } else {
+                                        window.prompt(
+                                          'Copy code:',
+                                          codeText
+                                        );
+                                      }
+                                    } catch (err) {
+                                      console.error(
+                                        'Copy failed',
+                                        err
+                                      );
+                                    }
+                                  };
 
-  // 🔹 Inline code: no syntax highlighting, just a pill
-  if (inline) {
-    return (
-      <code className="gpt-inline-code" {...props}>
-        {children}
-      </code>
-    );
-  }
+                                  if (inline) {
+                                    return (
+                                      <code
+                                        className="gpt-inline-code"
+                                        {...props}
+                                      >
+                                        {children}
+                                      </code>
+                                    );
+                                  }
 
-  // 🔹 Block code: run through highlight.js
-  let highlightedHtml = codeText;
-  try {
-    if (lang && hljs.getLanguage(lang)) {
-      highlightedHtml = hljs.highlight(codeText, { language: lang }).value;
-    } else {
-      highlightedHtml = hljs.highlightAuto(codeText).value;
-    }
-  } catch (err) {
-    console.error('highlight.js error', err);
-    highlightedHtml = codeText; // fallback if something explodes
-  }
+                                  let highlightedHtml = codeText;
+                                  try {
+                                    if (
+                                      lang &&
+                                      hljs.getLanguage(lang)
+                                    ) {
+                                      highlightedHtml =
+                                        hljs.highlight(codeText, {
+                                          language: lang,
+                                        }).value;
+                                    } else {
+                                      highlightedHtml =
+                                        hljs.highlightAuto(
+                                          codeText
+                                        ).value;
+                                    }
+                                  } catch (err) {
+                                    console.error(
+                                      'highlight.js error',
+                                      err
+                                    );
+                                    highlightedHtml = codeText;
+                                  }
 
-  const codeClass = ['hljs', className].filter(Boolean).join(' ');
+                                  const codeClass = ['hljs', className]
+                                    .filter(Boolean)
+                                    .join(' ');
 
-  return (
-    <div className="gpt-code-block">
-      <div className="gpt-code-header">
-        <span className="gpt-code-lang">{lang || 'code'}</span>
-        <button
-          type="button"
-          className="gpt-code-copy-btn"
-          onClick={handleCopy}
-        >
-          Copy
-        </button>
-      </div>
-      <pre className="gpt-code">
-        <code
-          className={codeClass}
-          dangerouslySetInnerHTML={{ __html: highlightedHtml }}
-          {...props}
-        />
-      </pre>
-    </div>
-  );
-},
+                                  return (
+                                    <div className="gpt-code-block">
+                                      <div className="gpt-code-header">
+                                        <span className="gpt-code-lang">
+                                          {lang || 'code'}
+                                        </span>
+                                        <button
+                                          type="button"
+                                          className="gpt-code-copy-btn"
+                                          onClick={handleCopy}
+                                        >
+                                          Copy
+                                        </button>
+                                      </div>
+                                      <pre className="gpt-code">
+                                        <code
+                                          className={codeClass}
+                                          dangerouslySetInnerHTML={{
+                                            __html: highlightedHtml,
+                                          }}
+                                          {...props}
+                                        />
+                                      </pre>
+                                    </div>
+                                  );
+                                },
+                              }}
+                            >
+                              {msg.content}
+                            </ReactMarkdown>
+                          </div>
+                        ) : (
+                          msg.content
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
 
-                }}
-              >
-                {msg.content}
-              </ReactMarkdown>
-            </div>
-          ) : (
-            msg.content
-          )}
-        </div>
-      </div>
-    </div>
-  ))}
-
-  {gptError && (
-    <div className="gpt-message gpt-message--error">
-      <div className="gpt-message-avatar">!</div>
-      <div className="gpt-message-bubble">
-        <div className="gpt-message-meta">Error</div>
-        <div className="gpt-message-content">{gptError}</div>
-      </div>
-    </div>
-  )}
-</div>
-
+                {gptError && (
+                  <div className="gpt-message gpt-message--error">
+                    <div className="gpt-message-avatar">!</div>
+                    <div className="gpt-message-bubble">
+                      <div className="gpt-message-meta">Error</div>
+                      <div className="gpt-message-content">
+                        {gptError}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
 
               <div className="gpt-input">
                 <textarea
-                placeholder={
-                  gptBusy
-                   ? 'Waiting for GPT to respond…'
-                    : selectedPath
-                   ? 'e.g. “Add a pulsing border around the HUD”'
-                   : 'Tip: select a file so GPT can see your overlay code, then ask for changes.'
-               }
-               value={gptPrompt}
-               onChange={(e) => setGptPrompt(e.target.value)}
-               onKeyDown={handleGptKeyDown}
-               disabled={gptBusy || gptQuotaReached}
-              />
+                  placeholder={
+                    gptBusy
+                      ? 'Waiting for GPT to respond…'
+                      : selectedPath
+                      ? 'e.g. “Add a pulsing border around the HUD”'
+                      : 'Tip: select a file so GPT can see your overlay code, then ask for changes.'
+                  }
+                  value={gptPrompt}
+                  onChange={(e) => setGptPrompt(e.target.value)}
+                  onKeyDown={handleGptKeyDown}
+                  disabled={gptBusy || gptQuotaReached}
+                />
 
                 <div
                   style={{
@@ -1667,7 +1778,9 @@ code({ inline, className, children, ...props }) {
                       className="button primary"
                       onClick={onRunGpt}
                       disabled={
-                        gptBusy || !gptPrompt.trim() || gptQuotaReached
+                        gptBusy ||
+                        !gptPrompt.trim() ||
+                        gptQuotaReached
                       }
                     >
                       {gptBusy
@@ -1698,9 +1811,15 @@ code({ inline, className, children, ...props }) {
                   >
                     {gptDailyLimit !== null ? (
                       gptQuotaReached ? (
-                        <>Daily GPT limit reached ({gptCalls} / {gptDailyLimit} calls)</>
+                        <>
+                          Daily GPT limit reached ({gptCalls} /{' '}
+                          {gptDailyLimit} calls)
+                        </>
                       ) : (
-                        <>Uses your daily GPT quota ({gptCalls} / {gptDailyLimit} calls today)</>
+                        <>
+                          Uses your daily GPT quota ({gptCalls} /{' '}
+                          {gptDailyLimit} calls today)
+                        </>
                       )
                     ) : (
                       <>Uses your daily GPT quota.</>

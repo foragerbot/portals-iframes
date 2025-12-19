@@ -503,27 +503,41 @@ body {
    Editor
    ──────────────────────────────────────────── */
 
+
+/* Textarea overlay: full-size, handles input + scroll */
 .editor-textarea {
-  flex: 1;
+  position: absolute;
+  inset: 0;                    /* fill the same area as highlight */
+  margin: 0;
+
+  z-index: 1;                  /* 🔑 above highlight */
+  flex: 1 1 auto;
   width: 100%;
+  height: 100%;
   resize: none;
+
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
     'Liberation Mono', 'Courier New', monospace;
   font-size: var(--editor-code-font-size);
   line-height: 1.4;
-  color: var(--text-main);
-  background: var(--bg-main);
+
+  /* Hide its own text so only the colored layer is visible */
+  color: transparent;
+  caret-color: var(--text-main);
+
+  background: transparent;
   border-radius: 8px;
   border: 1px solid var(--panel-border);
   padding: 8px;
   outline: none;
+  overflow: auto;              /* textarea owns the scrollbar */
+  box-sizing: border-box;
 }
 
 .editor-textarea:focus {
   border-color: var(--accent-primary);
   box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.5);
 }
-
 .editor-actions {
   margin-top: 8px;
   display: flex;
@@ -533,6 +547,40 @@ body {
   color: var(--text-main);
   flex-wrap: wrap;
 }
+
+/* Editor: overlayed syntax highlight behind textarea */
+
+.editor-code-shell {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Highlight layer (read-only, fills the shell behind the textarea) */
+.editor-highlight {
+  position: absolute;
+  inset: 0;                    /* top:0; right:0; bottom:0; left:0; */
+  margin: 0;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--code-bg);
+  color: var(--code-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    'Liberation Mono', 'Courier New', monospace;
+  font-size: var(--editor-code-font-size);
+  line-height: 1.4;
+  white-space: pre;
+  overflow: hidden;            /* no own scrollbar, we sync from textarea */
+  pointer-events: none;        /* 🔑 don’t intercept clicks/scroll */
+  box-sizing: border-box;
+  z-index: 0;
+}
+
+/* Make highlighted spans behave */
+.editor-highlight .hljs {
+  display: block;
+}
+
 
 /* Buttons */
 
@@ -795,21 +843,75 @@ body {
 }
 
 /* highlight.js token coloring (themeable via CSS vars) */
-
-.gpt-code .hljs {
+/* Base for highlighted code in GPT + editor */
+.gpt-code .hljs,
+.editor-highlight .hljs {
   display: block;
   color: var(--code-text);
 }
 
+/* Keywords, tags, attribute names, function names */
 .gpt-code .hljs-keyword,
-.gpt-code .hljs-selector-tag {
+.editor-highlight .hljs-keyword,
+.gpt-code .hljs-selector-tag,
+.editor-highlight .hljs-selector-tag,
+.gpt-code .hljs-name,
+.editor-highlight .hljs-name,
+.gpt-code .hljs-attr,
+.editor-highlight .hljs-attr,
+.gpt-code .hljs-attribute,
+.editor-highlight .hljs-attribute,
+.gpt-code .hljs-built_in,
+.editor-highlight .hljs-built_in,
+.gpt-code .hljs-title,
+.editor-highlight .hljs-title {
   color: var(--hljs-keyword);
   font-weight: 600;
 }
 
+/* Strings & attributes values */
 .gpt-code .hljs-string,
-.gpt-code .hljs-attr {
+.editor-highlight .hljs-string,
+.gpt-code .hljs-meta-string,
+.editor-highlight .hljs-meta-string,
+.gpt-code .hljs-template-variable,
+.editor-highlight .hljs-template-variable {
   color: var(--hljs-string);
+}
+
+/* Numbers, literals, booleans */
+.gpt-code .hljs-number,
+.editor-highlight .hljs-number,
+.gpt-code .hljs-literal,
+.editor-highlight .hljs-literal,
+.gpt-code .hljs-symbol,
+.editor-highlight .hljs-symbol {
+  color: var(--hljs-number);
+}
+
+/* Comments, docstrings, quotes */
+.gpt-code .hljs-comment,
+.editor-highlight .hljs-comment,
+.gpt-code .hljs-quote,
+.editor-highlight .hljs-quote {
+  color: var(--hljs-comment);
+  font-style: italic;
+}
+
+/* Functions */
+.gpt-code .hljs-function .hljs-title,
+.editor-highlight .hljs-function .hljs-title,
+.gpt-code .hljs-function,
+.editor-highlight .hljs-function {
+  color: var(--hljs-function);
+}
+
+/* Variables & params */
+.gpt-code .hljs-variable,
+.editor-highlight .hljs-variable,
+.gpt-code .hljs-params,
+.editor-highlight .hljs-params {
+  color: var(--hljs-variable);
 }
 
 .gpt-code .hljs-number,
@@ -832,6 +934,19 @@ body {
   color: var(--hljs-variable);
 }
 
+.gpt-code .hljs,
+.editor-highlight .hljs {
+  display: block;
+  color: var(--code-text);
+}
+
+.gpt-code .hljs-keyword,
+.editor-highlight .hljs-keyword,
+.gpt-code .hljs-selector-tag,
+.editor-highlight .hljs-selector-tag {
+  color: var(--hljs-keyword);
+  font-weight: 600;
+}
 /* ────────────────────────────────────────────
    Usage / quota chip
    ──────────────────────────────────────────── */
