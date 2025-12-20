@@ -42,6 +42,7 @@ import {
   GPT_RATE_MAX_PER_WINDOW,
   TRUST_PROXY,
   PORTALS_FRAME_ANCESTORS,
+  MAX_PENDING_WORKSPACE_REQUESTS,
 } from './config.js';
 
 import { readJsonArray, writeJsonArray } from './stores/jsonStore.js';
@@ -116,6 +117,133 @@ function pickModel(requested) {
     return requested;
   }
   return DEFAULT_GPT_MODEL;
+}
+
+// ───────────────── Billing / entitlement helpers ─────────────────
+
+const PUBLIC_UNPAID_MODE = String(process.env.PUBLIC_UNPAID_MODE || 'paywall').toLowerCase();
+// 'paywall' | '404'
+
+const PAYWALL_CONTACT_EMAIL =
+  process.env.PAYWALL_CONTACT_EMAIL ||
+  WORKSPACE_ADMIN_EMAIL ||
+  SENDGRID_FROM ||
+  null;
+
+function normalizeEmail(email) {
+  return String(email || '').trim().toLowerCase();
+}
+
+function withUserDefaults(u) {
+  const user = u || {};
+  const billing = user.billing || {};
+  return {
+    ...user,
+    status: user.status || 'active',
+    lastLoginAt: user.lastLoginAt || null,
+    billing: {
+      paidUntil: billing.paidUntil || null,   // ISO string or null
+      comped: Boolean(billing.comped),        // true/false
+      wallet: billing.wallet || null,
+      notes: billing.notes || null,
+    },
+  };
+}
+
+function isUserPaid(user) {
+  const u = withUserDefaults(user);
+
+  if (u.status !== 'active') return false;
+  if (u.billing.comped) return true;
+
+  if (!u.billing.paidUntil) return false;
+  const t = new Date(u.billing.paidUntil).getTime();
+  if (!Number.isFinite(t)) return false;
+
+  return t > Date.now();
+}
+
+function requestWantsHtml(req) {
+  const accept = String(req.get('accept') || '').toLowerCase();
+  if (accept.includes('text/html')) return true;
+
+  // If extension is empty, treat as html-ish
+  const ext = (path.extname(req.path || '') || '').toLowerCase();
+  return !ext || ext === '.html' || ext === '.htm';
+}
+
+function sendInertPublicResponse(req, res, slug) {
+  // If you want stealth, force 404
+  if (PUBLIC_UNPAID_MODE === '404' || !requestWantsHtml(req)) {
+    return res.status(404).send('Not found');
+  }
+
+  const contactLine = PAYWALL_CONTACT_EMAIL
+    ? `Contact <a href="mailto:${PAYWALL_CONTACT_EMAIL}" style="color:#22d3ee;text-decoration:none;">${PAYWALL_CONTACT_EMAIL}</a> to reactivate.`
+    : `Contact the admin to reactivate.`;
+
+  res.status(402); // Payment Required (works fine in practice)
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+
+  return res.send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Overlay inactive</title>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #020617;
+      color: #e5e7eb;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      padding: 16px;
+      box-sizing: border-box;
+    }
+    .card {
+      width: min(520px, 100%);
+      border: 1px solid #1f2937;
+      border-radius: 16px;
+      background: rgba(15,23,42,0.9);
+      padding: 16px;
+    }
+    .kicker {
+      font-size: 11px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: #22d3ee;
+      margin-bottom: 8px;
+    }
+    h1 { font-size: 16px; margin: 0 0 8px; }
+    p { margin: 0 0 10px; color: #cbd5f5; font-size: 13px; line-height: 1.35; }
+    code { color: #93c5fd; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="kicker">Portals iFrame Builder</div>
+    <h1>Oh no! This page is inactive!</h1>
+    <p>If you are the owner of this page, please contact the admin immediately.</p>
+    <p>${contactLine}</p>
+    <p style="opacity:.75;font-size:12px;margin-top:12px;">
+      Space: <code>${String(slug || '')}</code>
+    </p>
+  </div>
+</body>
+</html>`);
+}
+
+async function findUserByEmail(email) {
+  const normalized = normalizeEmail(email);
+  if (!normalized) return null;
+
+  const users = await loadUsersMeta();
+  const u = users.find((x) => normalizeEmail(x.email) === normalized);
+  return u || null;
 }
 
 // ───────────────── Generic helpers ─────────────────
@@ -208,15 +336,20 @@ function isValidSlug(slug) {
 async function getUserSpaceBySlug(slug, user) {
   if (!user) return null;
   const spaces = await loadSpacesMeta();
+
   const normalizedEmail = (user.email || '').trim().toLowerCase();
+
   return spaces.find(
     (s) =>
       s.slug === slug &&
       s.status === 'active' &&
-      s.ownerEmail &&
-      s.ownerEmail === normalizedEmail
+      (
+        (s.ownerUserId && s.ownerUserId === user.id) ||
+        (s.ownerEmail && s.ownerEmail.trim().toLowerCase() === normalizedEmail)
+      )
   );
 }
+
 
 function resolveSpacePath(space, relPath) {
   const base = space.dirPath;
@@ -997,10 +1130,14 @@ app.get('/api/me', async (req, res, next) => {
 
     const spaces = await loadSpacesMeta();
 
-    // For now, associate spaces by ownerEmail === user.email (if set).
-    const mySpaces = spaces.filter(
-      (s) => s.ownerEmail && s.ownerEmail === req.user.email
-    );
+const normalizedEmail = (req.user.email || '').trim().toLowerCase();
+
+const mySpaces = spaces.filter((s) => {
+  if (s.status !== 'active') return false;
+  if (s.ownerUserId && s.ownerUserId === req.user.id) return true;
+  if (s.ownerEmail && s.ownerEmail.trim().toLowerCase() === normalizedEmail) return true;
+  return false;
+});
 
     res.json({
       ok: true,
@@ -1984,17 +2121,18 @@ app.post('/api/spaces/request', requireUser, requireEditorOrigin, async (req, re
 
     const requests = await loadWorkspaceRequests();
 
-    // If there's already a pending request for this user, don't spam
-    const existing = requests.find(
-      (r) => r.userId === req.user.id && r.status === 'pending'
-    );
-    if (existing) {
-      return res.json({
-        ok: true,
-        alreadyPending: true,
-        request: existing
-      });
-    }
+const pending = requests.filter(
+  (r) => r.userId === req.user.id && r.status === 'pending'
+);
+
+if (pending.length >= MAX_PENDING_WORKSPACE_REQUESTS) {
+  return res.status(429).json({
+    ok: false,
+    error: 'too_many_pending_requests',
+    message: `You already have ${pending.length} pending request(s).`,
+    pending,
+  });
+}
 
        let suggestedSlug = null;
     if (suggestedSlugRaw) {
@@ -2079,6 +2217,18 @@ app.post('/api/admin/spaces', requireAdmin, async (req, res, next) => {
       });
     }
 
+let normalizedOwnerEmail = null;
+let ownerUserId = null;
+
+if (ownerEmail && isValidEmail(ownerEmail)) {
+  normalizedOwnerEmail = ownerEmail.trim().toLowerCase();
+  const users = await loadUsersMeta();
+  const u = users.find(
+    (x) => (x.email || '').trim().toLowerCase() === normalizedOwnerEmail
+  );
+  ownerUserId = u ? u.id : null;
+}
+    
     const spaces = await loadSpacesMeta();
     if (spaces.find((s) => s.slug === slug)) {
       console.log('[admin] slug already exists:', slug);
@@ -2168,9 +2318,8 @@ app.post('/api/admin/spaces', requireAdmin, async (req, res, next) => {
       createdAt: now,
       updatedAt: now,
       status: 'active',
-      ownerEmail: ownerEmail && isValidEmail(ownerEmail)
-        ? ownerEmail.trim().toLowerCase()
-        : null,
+      ownerEmail: normalizedOwnerEmail,
+      ownerUserId,
     };
 
     spaces.push(spaceRecord);
@@ -2303,7 +2452,8 @@ app.post('/api/admin/space-requests/:id/approve', requireAdmin, requireEditorOri
       createdAt: now,
       updatedAt: now,
       status: 'active',
-      ownerEmail: (user.email || '').trim().toLowerCase()
+      ownerEmail: (user.email || '').trim().toLowerCase(),
+      ownerUserId: user.id,
     };
 
     spaces.push(spaceRecord);
@@ -2407,8 +2557,24 @@ app.use('/p/:slug', portalsEmbedHeaders, async (req, res, next) => {
       return res.status(404).send('Space not found');
     }
 
+    // ✅ If this space belongs to a user, enforce billing here.
+    // If ownerEmail is null (admin-created “public marketing space”), we skip gating.
+    if (space.ownerEmail) {
+      const ownerUser = await findUserByEmail(space.ownerEmail);
+
+      // If we can’t find the owner user record, treat it as inactive (safer)
+      if (!ownerUser || !isUserPaid(ownerUser)) {
+        return sendInertPublicResponse(req, res, slug);
+      }
+    }
+
+    // Serve the actual files
     const staticMiddleware = express.static(space.dirPath, {
       fallthrough: false,
+      setHeaders(res /*, filePath */) {
+        // Avoid stale overlays while you’re iterating
+        res.setHeader('Cache-Control', 'no-store');
+      },
     });
 
     return staticMiddleware(req, res, (err) => {
@@ -2421,6 +2587,7 @@ app.use('/p/:slug', portalsEmbedHeaders, async (req, res, next) => {
     next(err);
   }
 });
+
 
 // Admin: list approved emails (allowlist)
 // GET /api/admin/approved-users

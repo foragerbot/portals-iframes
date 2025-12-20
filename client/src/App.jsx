@@ -191,37 +191,64 @@ function Sidebar({
   onToggleFiles,
   onToggleEditor,
   onToggleGpt,
+  onRequestAnotherWorkspace,
+  requestWorkspaceBusy,
+  requestWorkspaceStatus,
+  pendingWorkspaceRequest,
 }) {
   return (
     <aside className="app-sidebar">
       {/* SPACES */}
       <div className="sidebar-section">
         <h2>Spaces</h2>
-        {spaces.length === 0 ? (
-          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-            No spaces yet. Ask admin.
+<ul className="space-list">
+          {spaces.length === 0 ? (
+            <li style={{ fontSize: 12, color: 'var(--text-muted)', padding: '8px 10px' }}>
+              No spaces yet.
+            </li>
+          ) : null}
+
+          {spaces.map((s) => (
+            <li
+              key={s.slug}
+              className={'space-item' + (s.slug === activeSlug ? ' active' : '')}
+              onClick={() => onSelect(s.slug)}
+            >
+              <div className="space-item-name">{s.slug}</div>
+              <div className="space-item-meta">
+                {s.quotaMb ?? '—'} MB quota
+                {s.slug === usage?.slug ? ` · ${usage.usedMb.toFixed(2)} MB used` : ''}
+              </div>
+            </li>
+          ))}
+ {/* Ghost item: request another workspace */}
+          <li
+            className="space-item space-item--ghost"
+            onClick={() => {
+              if (requestWorkspaceBusy) return;
+              onRequestAnotherWorkspace?.();
+            }}
+            style={{
+              cursor: requestWorkspaceBusy ? 'not-allowed' : 'pointer',
+              opacity: requestWorkspaceBusy ? 0.7 : 1,
+            }}
+            title="Request an additional workspace"
+          >
+            <div className="space-item-name">
+              {requestWorkspaceBusy ? 'Requesting…' : '+ Request another workspace'}
+            </div>
+            <div className="space-item-meta">
+              {pendingWorkspaceRequest?.status === 'pending'
+                ? 'You have a request pending review'
+                : 'Ask an admin to provision a new space'}
+            </div>
+          </li>
+        </ul>
+        {requestWorkspaceStatus ? (
+          <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)' }}>
+            {requestWorkspaceStatus}
           </div>
-        ) : (
-          <ul className="space-list">
-            {spaces.map((s) => (
-              <li
-                key={s.slug}
-                className={
-                  'space-item' + (s.slug === activeSlug ? ' active' : '')
-                }
-                onClick={() => onSelect(s.slug)}
-              >
-                <div className="space-item-name">{s.slug}</div>
-                <div className="space-item-meta">
-                  {s.quotaMb ?? '—'} MB quota
-                  {s.slug === usage?.slug
-                    ? ` · ${usage.usedMb.toFixed(2)} MB used`
-                    : ''}
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
+        ) : null}
       </div>
 
       {/* USAGE */}
@@ -1878,8 +1905,6 @@ function SpaceEditor({
   );
 }
 
-
-
 function DashboardPage() {
   const { me, loading, refresh } = useMe();
   const navigate = useNavigate();
@@ -1887,38 +1912,43 @@ function DashboardPage() {
 
   const [activeSlug, setActiveSlug] = useState(null);
   const [usage, setUsage] = useState(null);
-  const [spaceDirty, setSpaceDirty] = useState(false); 
+  const [spaceDirty, setSpaceDirty] = useState(false);
+
   // panel visibility lives here so sidebar controls it
   const [showFiles, setShowFiles] = useState(true);
   const [showEditor, setShowEditor] = useState(true);
   const [showGpt, setShowGpt] = useState(true);
 
-  // workspace request UX
+  // workspace request UX (reused for first + additional workspaces)
   const [requestingWorkspace, setRequestingWorkspace] = useState(false);
   const [workspaceRequestStatus, setWorkspaceRequestStatus] = useState('');
   const [workspaceSlugSuggestion, setWorkspaceSlugSuggestion] = useState('');
   const [workspaceNote, setWorkspaceNote] = useState('');
-
   const [pendingRequest, setPendingRequest] = useState(null);
+
+  // Request form modal
+  const [workspaceRequestOpen, setWorkspaceRequestOpen] = useState(false);
+
+  // NEW: compact “OK” confirmation modal
+  const [workspaceRequestOkOpen, setWorkspaceRequestOkOpen] = useState(false);
+  const [workspaceRequestOkMessage, setWorkspaceRequestOkMessage] = useState('');
 
   // track when we're in "mobile/stacked" mode
   const [isNarrow, setIsNarrow] = useState(
     typeof window !== 'undefined' ? window.innerWidth <= 1024 : false
   );
-    useEffect(() => {
-    const onResize = () => {
-      setIsNarrow(window.innerWidth <= 1024);
-    };
+
+  useEffect(() => {
+    const onResize = () => setIsNarrow(window.innerWidth <= 1024);
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
-    // When in narrow mode, ensure only one panel is active at a time
+  // When in narrow mode, ensure only one panel is active at a time
   useEffect(() => {
     if (!isNarrow) return;
-
     const activeCount = [showFiles, showEditor, showGpt].filter(Boolean).length;
-    if (activeCount <= 1) return; // already fine
+    if (activeCount <= 1) return;
 
     // Priority: Editor > GPT > Files
     if (showEditor) {
@@ -1932,7 +1962,6 @@ function DashboardPage() {
     }
   }, [isNarrow, showFiles, showEditor, showGpt]);
 
-
   // Redirect to /login if not logged in
   useEffect(() => {
     if (!loading && !me) {
@@ -1940,7 +1969,6 @@ function DashboardPage() {
     }
   }, [me, loading, navigate, location.pathname]);
 
-  // Fetch usage when activeSlug changes
   const refreshUsage = useCallback(
     async (slugOverride) => {
       const slug = slugOverride || activeSlug;
@@ -1964,23 +1992,21 @@ function DashboardPage() {
   }, [me, activeSlug]);
 
   useEffect(() => {
-    if (activeSlug) {
-      refreshUsage(activeSlug);
-    }
+    if (activeSlug) refreshUsage(activeSlug);
   }, [activeSlug, refreshUsage]);
 
   const handleLogout = useCallback(async () => {
     try {
-      await logout(); // POST /api/auth/logout
+      await logout();
     } catch (err) {
       console.error(err);
     } finally {
-      await refresh?.(); // clear /api/me state
+      await refresh?.();
       navigate('/login', { replace: true });
     }
   }, [navigate, refresh]);
 
-    const handleSelectSpace = useCallback(
+  const handleSelectSpace = useCallback(
     (slug) => {
       if (slug === activeSlug) return;
 
@@ -1996,11 +2022,10 @@ function DashboardPage() {
     [activeSlug, spaceDirty]
   );
 
-    const handleToggleFiles = useCallback(() => {
+  const handleToggleFiles = useCallback(() => {
     setShowFiles((prev) => {
       const next = !prev;
       if (next && isNarrow) {
-        // on narrow screens, Files wins; hide others
         setShowEditor(false);
         setShowGpt(false);
       }
@@ -2030,9 +2055,38 @@ function DashboardPage() {
     });
   }, [isNarrow]);
 
+  const closeWorkspaceRequestModal = useCallback(() => {
+    if (requestingWorkspace) return;
+    setWorkspaceRequestOpen(false);
+  }, [requestingWorkspace]);
+
+  const openWorkspaceRequestModal = useCallback(() => {
+    // If we already *know* there’s a pending request this session, show the OK modal instead.
+    if (pendingRequest?.status === 'pending') {
+      const msg = 'You already have a pending request. An admin will review it soon.';
+      setWorkspaceRequestStatus(msg);
+      setWorkspaceRequestOkMessage(msg);
+      setWorkspaceRequestOkOpen(true);
+      return;
+    }
+
+    setWorkspaceRequestStatus('');
+    setWorkspaceRequestOpen(true);
+  }, [pendingRequest]);
+
+  const closeWorkspaceRequestOkModal = useCallback(() => {
+    setWorkspaceRequestOkOpen(false);
+  }, []);
+
+  const showWorkspaceOk = useCallback((message) => {
+    setWorkspaceRequestOkMessage(message);
+    setWorkspaceRequestOkOpen(true);
+  }, []);
+
   const handleRequestWorkspace = async () => {
     setWorkspaceRequestStatus('');
     setRequestingWorkspace(true);
+
     try {
       const data = await requestWorkspace(
         workspaceNote || null,
@@ -2041,17 +2095,26 @@ function DashboardPage() {
 
       if (data.request) {
         setPendingRequest(data.request);
-        setWorkspaceSlugSuggestion(data.request.suggestedSlug || '');
-        setWorkspaceNote(data.request.note || '');
+        // keep any admin-friendly context visible if user reopens later
+        setWorkspaceSlugSuggestion(data.request.suggestedSlug || workspaceSlugSuggestion);
+        setWorkspaceNote(data.request.note || workspaceNote);
       }
 
-      if (data.alreadyPending) {
-        setWorkspaceRequestStatus('You already have a pending workspace request.');
-      } else {
-        setWorkspaceRequestStatus('Request sent. An admin will review it soon.');
-      }
+      // Message rules:
+      // - if alreadyPending: tell them they’re queued
+      // - else: exact success line + OK to continue
+      const msg = data.alreadyPending
+        ? 'You already have a pending request. An admin will review it soon.'
+        : 'Request sent. An admin will review it soon.';
+
+      setWorkspaceRequestStatus(msg);
+
+      // Close the big form modal and show the smaller OK modal
+      setWorkspaceRequestOpen(false);
+      showWorkspaceOk(msg);
     } catch (err) {
       console.error(err);
+      // keep the form open on error (so they can fix slug, etc.)
       setWorkspaceRequestStatus(
         err.payload?.message || 'Failed to submit workspace request.'
       );
@@ -2059,8 +2122,6 @@ function DashboardPage() {
       setRequestingWorkspace(false);
     }
   };
-
-  // 🔽 early returns AFTER all hooks are declared
 
   if (loading) {
     return (
@@ -2073,11 +2134,10 @@ function DashboardPage() {
     );
   }
 
-  if (!me) {
-    return null;
-  }
+  if (!me) return null;
 
   const spaces = me.spaces || [];
+  const hasPending = pendingRequest?.status === 'pending';
 
   return (
     <LayoutShell me={me} usage={usage} onLogout={handleLogout}>
@@ -2092,9 +2152,12 @@ function DashboardPage() {
         onToggleFiles={handleToggleFiles}
         onToggleEditor={handleToggleEditor}
         onToggleGpt={handleToggleGpt}
-        // (you can drop this next prop if you like; Sidebar doesn't use it)
-        // onUsageRefresh={() => refreshUsage(activeSlug)}
+        onRequestAnotherWorkspace={openWorkspaceRequestModal}
+        requestWorkspaceBusy={requestingWorkspace}
+        requestWorkspaceStatus={workspaceRequestStatus}
+        pendingWorkspaceRequest={pendingRequest}
       />
+
       {activeSlug ? (
         <SpaceEditor
           key={activeSlug}
@@ -2104,13 +2167,10 @@ function DashboardPage() {
           showGpt={showGpt}
           onUsageRefresh={() => refreshUsage(activeSlug)}
           onDirtyChange={setSpaceDirty}
+          usage={usage}
         />
-
       ) : (
-        <div
-          className="app-content"
-          style={{ alignItems: 'center', justifyContent: 'center' }}
-        >
+        <div className="app-content" style={{ alignItems: 'center', justifyContent: 'center' }}>
           <div
             style={{
               fontSize: 14,
@@ -2122,58 +2182,261 @@ function DashboardPage() {
           >
             <div style={{ marginBottom: 8 }}>No spaces assigned to you yet.</div>
             <div style={{ marginBottom: 12 }}>
-              You can request a new workspace for your Portals overlays. An admin will review and
-              create a space for you.
+              You can request a new workspace. An admin will review and create a space for you.
             </div>
 
-            {pendingRequest ? (
-              // ... your existing pendingRequest block ...
-              <div
-                style={{
-                  textAlign: 'left',
-                  marginBottom: 12,
-                  padding: 10,
-                  borderRadius: 8,
-                  border: '1px solid var(--panel-border)',
-                  background: 'rgba(15,23,42,0.9)',
-                }}
-              >
-                {/* unchanged content */}
-                {/* ... */}
-              </div>
-            ) : (
-              <>
-                {/* workspace request form, unchanged */}
-                {/* ... */}
-                <button
-                  className="button primary"
-                  type="button"
-                  onClick={handleRequestWorkspace}
-                  disabled={requestingWorkspace}
-                >
-                  {requestingWorkspace ? 'Requesting…' : 'Request workspace'}
-                </button>
-              </>
-            )}
+            <div style={{ textAlign: 'left', marginBottom: 12 }}>
+              <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                Suggested slug (optional)
+                <input
+                  type="text"
+                  value={workspaceSlugSuggestion}
+                  onChange={(e) => setWorkspaceSlugSuggestion(e.target.value)}
+                  placeholder="e.g. scott-hud"
+                  style={{
+                    marginTop: 6,
+                    width: '100%',
+                    borderRadius: 999,
+                    border: '1px solid var(--panel-border)',
+                    background: 'var(--bg-main)',
+                    color: 'var(--text-main)',
+                    padding: '8px 12px',
+                    fontSize: 13,
+                  }}
+                />
+              </label>
 
-            {workspaceRequestStatus && (
-              <div
+              <label
                 style={{
-                  marginTop: 8,
                   fontSize: 12,
                   color: 'var(--text-muted)',
+                  marginTop: 10,
+                  display: 'block',
                 }}
               >
+                Note (optional)
+                <textarea
+                  value={workspaceNote}
+                  onChange={(e) => setWorkspaceNote(e.target.value)}
+                  placeholder="What is this workspace for?"
+                  rows={4}
+                  style={{
+                    marginTop: 6,
+                    width: '100%',
+                    borderRadius: 12,
+                    border: '1px solid var(--panel-border)',
+                    background: 'var(--bg-main)',
+                    color: 'var(--text-main)',
+                    padding: '10px 12px',
+                    fontSize: 13,
+                    resize: 'vertical',
+                  }}
+                />
+              </label>
+            </div>
+
+            <button
+              className="button primary"
+              type="button"
+              onClick={handleRequestWorkspace}
+              disabled={requestingWorkspace || hasPending}
+              title={hasPending ? 'You already have a pending request' : 'Request workspace'}
+            >
+              {requestingWorkspace
+                ? 'Requesting…'
+                : hasPending
+                ? 'Request pending'
+                : 'Request workspace'}
+            </button>
+
+            {workspaceRequestStatus && (
+              <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-muted)' }}>
                 {workspaceRequestStatus}
               </div>
             )}
           </div>
         </div>
       )}
+
+      {/* Workspace Request Form Modal (tighter, less “funky”) */}
+      {workspaceRequestOpen && (
+        <div className="preview-modal-backdrop" onClick={closeWorkspaceRequestModal}>
+          <div
+            className="preview-modal"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 'min(680px, 92vw)',
+              maxWidth: 680,
+              height: 'auto',
+              minHeight: 0,
+            }}
+          >
+            <div className="preview-modal-header">
+              <div>
+                <div className="preview-modal-title">Request another workspace</div>
+                <div className="preview-modal-subtitle">Your request goes to the admin queue.</div>
+              </div>
+              <button
+                type="button"
+                className="preview-modal-close"
+                onClick={closeWorkspaceRequestModal}
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+
+            <div
+              className="preview-modal-body"
+              style={{
+                display: 'block',
+                padding: 16,
+              }}
+            >
+              <div style={{ width: '100%', maxWidth: 520, margin: '0 auto' }}>
+                {hasPending && (
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>
+                    You already have a pending request. You can’t submit another until it’s reviewed.
+                  </div>
+                )}
+
+                <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'block' }}>
+                  Suggested slug (optional)
+                  <input
+                    type="text"
+                    value={workspaceSlugSuggestion}
+                    onChange={(e) => setWorkspaceSlugSuggestion(e.target.value)}
+                    placeholder="e.g. scott-hud-v2"
+                    style={{
+                      marginTop: 6,
+                      width: '100%',
+                      borderRadius: 999,
+                      border: '1px solid var(--panel-border)',
+                      background: 'var(--bg-main)',
+                      color: 'var(--text-main)',
+                      padding: '8px 12px',
+                      fontSize: 13,
+                    }}
+                    disabled={requestingWorkspace}
+                  />
+                </label>
+
+                <label
+                  style={{
+                    fontSize: 12,
+                    color: 'var(--text-muted)',
+                    display: 'block',
+                    marginTop: 12,
+                  }}
+                >
+                  Note (optional)
+                  <textarea
+                    value={workspaceNote}
+                    onChange={(e) => setWorkspaceNote(e.target.value)}
+                    placeholder="What is this workspace for?"
+                    rows={4}
+                    style={{
+                      marginTop: 6,
+                      width: '100%',
+                      borderRadius: 12,
+                      border: '1px solid var(--panel-border)',
+                      background: 'var(--bg-main)',
+                      color: 'var(--text-main)',
+                      padding: '10px 12px',
+                      fontSize: 13,
+                      resize: 'vertical',
+                    }}
+                    disabled={requestingWorkspace}
+                  />
+                </label>
+
+                {workspaceRequestStatus && (
+                  <div style={{ marginTop: 10, fontSize: 12, color: 'var(--text-muted)' }}>
+                    {workspaceRequestStatus}
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 14 }}>
+                  <button
+                    type="button"
+                    className="button"
+                    onClick={closeWorkspaceRequestModal}
+                    disabled={requestingWorkspace}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="button primary"
+                    onClick={handleRequestWorkspace}
+                    disabled={requestingWorkspace || hasPending}
+                  >
+                    {requestingWorkspace ? 'Requesting…' : 'Request workspace'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Compact OK Modal (after request is sent / already pending) */}
+      {workspaceRequestOkOpen && (
+        <div
+          className="preview-modal-backdrop"
+          onClick={() => {
+            // optional: allow click-outside to close
+            closeWorkspaceRequestOkModal();
+          }}
+        >
+          <div
+            className="preview-modal"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 'min(440px, 92vw)',
+              maxWidth: 440,
+              height: 'auto',
+              minHeight: 0,
+            }}
+          >
+            <div className="preview-modal-header">
+              <div>
+                <div className="preview-modal-title">Workspace request</div>
+                <div className="preview-modal-subtitle">Status</div>
+              </div>
+              <button
+                type="button"
+                className="preview-modal-close"
+                onClick={closeWorkspaceRequestOkModal}
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+
+            <div
+              className="preview-modal-body"
+              style={{
+                display: 'block',
+                padding: 16,
+              }}
+            >
+              <div style={{ fontSize: 13, color: 'var(--text-main)', lineHeight: 1.4 }}>
+                {workspaceRequestOkMessage || 'Request sent. An admin will review it soon.'}
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
+                <button type="button" className="button primary" onClick={closeWorkspaceRequestOkModal}>
+                  OK
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </LayoutShell>
   );
 }
-
 
 function AdminDashboard() {
   const [adminToken, setAdminToken] = useState(() => {
@@ -2647,11 +2910,11 @@ function AdminDashboard() {
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
                     <div>
                       <strong>{r.email}</strong>
-                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                      <div style={{ fontSize: 11, color: 'var(--danger)' }}>
                         userId: {r.userId}
                       </div>
                     </div>
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                    <div style={{ fontSize: 11, color: 'var(--danger)' }}>
                       {r.createdAt}
                     </div>
                   </div>
@@ -2659,7 +2922,7 @@ function AdminDashboard() {
                   {r.note && (
                     <div style={{ fontSize: 12, marginBottom: 6 }}>
                       Request note:{' '}
-                      <span style={{ color: 'var(--text-main)' }}>{r.note}</span>
+                      <span style={{ color: 'var(--accent-primary)' }}>{r.note}</span>
                     </div>
                   )}
 
@@ -2676,7 +2939,7 @@ function AdminDashboard() {
                           width: '100%',
                           borderRadius: 999,
                           border: '1px solid var(--panel-border)',
-                          background: '#020617',
+                          background: 'var(--bg-main)',
                           color: 'var(--text-main)',
                           padding: '4px 10px',
                           fontSize: 12
@@ -2688,7 +2951,7 @@ function AdminDashboard() {
                         3–32 chars; lowercase letters, digits, hyphens only.
                       </span>
                       {slugError && (
-                        <div style={{ color: '#f97373', marginTop: 2 }}>
+                        <div style={{ color: 'var(--danger)', marginTop: 2 }}>
                           {slugError}
                         </div>
                       )}

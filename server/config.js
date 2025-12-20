@@ -31,6 +31,11 @@ export const PORTALS_FRAME_ANCESTORS = (process.env.PORTALS_FRAME_ANCESTORS || '
 
 export const ADMIN_TOKEN = process.env.ADMIN_TOKEN || null;
 
+// Optional: allow multiple pending workspace requests per user
+export const MAX_PENDING_WORKSPACE_REQUESTS = Number(
+  process.env.MAX_PENDING_WORKSPACE_REQUESTS || 1
+);
+
 // Where the editor/app lives (used for redirects + "open app" links)
 export const APP_BASE_URL = stripTrailingSlashes(
   process.env.APP_BASE_URL || `http://localhost:${PORT}`

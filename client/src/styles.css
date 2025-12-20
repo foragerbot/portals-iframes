@@ -1424,6 +1424,14 @@ body {
   border-color: #ec4899;
 }
 
+.space-item--ghost {
+  border: 1px dashed var(--panel-border);
+  background: transparent;
+}
+.space-item--ghost:hover {
+  background: var(--accent-secondary);
+}
+
 /* ────────────────────────────────────────────
    Responsive
    ──────────────────────────────────────────── */
