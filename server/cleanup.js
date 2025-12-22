@@ -1,7 +1,24 @@
 // server/cleanup.js
 import { TOKENS_META_PATH, SESSIONS_META_PATH, SESSION_MAX_AGE_DAYS } from './config.js';
 import { readJsonArray, writeJsonArray } from './stores/jsonStore.js';
+import { pruneHistoryAllSpaces } from './history/pruneHistory.js';
 
+async function runHistoryPrune() {
+  const dryRun = String(process.env.HISTORY_PRUNE_DRY_RUN || '0') === '1';
+
+  const result = await pruneHistoryAllSpaces({
+    dryRun,
+    // optional overrides:
+    // keepLast: 50,
+    // keepFirst: true,
+    // deletedRetentionDays: 30,
+    // keepLastDeleted: 10,
+  });
+
+  console.log('[history-prune]', JSON.stringify(result, null, 2));
+}
+
+await runHistoryPrune();
 function daysAgo(num) {
   const d = new Date();
   d.setDate(d.getDate() - num);

@@ -1,14 +1,86 @@
+
 [
   {
-    "id": "wr_6003e844aedd19dd19a4acac75046bd6",
-    "userId": "u_68b513754f7554aa8d855cc7acf60a80",
+    "id": "wr_64bf8cb6cd063e81c3d0f6935c6514d6",
+    "userId": "u_b6ecc7d19a5d562660531150bac4168a",
+    "email": "iamscottking@gmail.com",
+    "status": "rejected",
+    "note": null,
+    "createdAt": "2025-12-15T02:53:50.881Z",
+    "updatedAt": "2025-12-15T03:03:32.864Z",
+    "rejectedAt": "2025-12-15T03:03:32.864Z",
+    "rejectReason": null
+  },
+  {
+    "id": "wr_e69460cd4345b7dc77940fc42a06a3a2",
+    "userId": "u_b6ecc7d19a5d562660531150bac4168a",
+    "email": "iamscottking@gmail.com",
+    "status": "rejected",
+    "note": "need it",
+    "suggestedSlug": "boogerface",
+    "createdAt": "2025-12-15T03:03:42.534Z",
+    "updatedAt": "2025-12-15T03:37:15.384Z",
+    "rejectedAt": "2025-12-15T03:37:15.384Z",
+    "rejectReason": null
+  },
+  {
+    "id": "wr_c4d19550f18cf1f730abac87978394bb",
+    "userId": "u_b6ecc7d19a5d562660531150bac4168a",
     "email": "iamscottking@gmail.com",
     "status": "approved",
+    "note": "i need it",
+    "suggestedSlug": "scott-test",
+    "createdAt": "2025-12-15T14:58:47.879Z",
+    "updatedAt": "2025-12-15T19:14:58.068Z",
+    "approvedAt": "2025-12-15T19:14:58.068Z",
+    "spaceSlug": "scott-test"
+  },
+  {
+    "id": "wr_53cc02bc5e6d1cd9a3d072696c917195",
+    "userId": "u_b42d5ade714360419aaf0d40aa3a6979",
+    "email": "betaraycooper@gmail.com",
+    "status": "approved",
     "note": null,
-    "suggestedSlug": "lklklk",
-    "createdAt": "2025-12-20T02:40:12.327Z",
-    "updatedAt": "2025-12-20T02:51:53.465Z",
-    "approvedAt": "2025-12-20T02:51:53.465Z",
-    "spaceSlug": "lklklk"
+    "suggestedSlug": null,
+    "createdAt": "2025-12-16T00:13:08.608Z",
+    "updatedAt": "2025-12-16T00:13:26.981Z",
+    "approvedAt": "2025-12-16T00:13:26.981Z",
+    "spaceSlug": "betaraycooper"
+  },
+  {
+    "id": "wr_82a1f0aa8d667eba66c7d3d8971dd001",
+    "userId": "u_a271e687ffefdb698c54978c1f430d18",
+    "email": "niklasriemer98@gmail.com",
+    "status": "approved",
+    "note": null,
+    "suggestedSlug": null,
+    "createdAt": "2025-12-16T12:17:46.748Z",
+    "updatedAt": "2025-12-16T12:27:31.282Z",
+    "approvedAt": "2025-12-16T12:27:31.282Z",
+    "spaceSlug": "niklasriemer98"
+  },
+  {
+    "id": "wr_2e5a8e073f15bd0fedcba039954a7961",
+    "userId": "u_d771c85b7ece388571e16b3ae3f4fe64",
+    "email": "bus@the-architects.io",
+    "status": "approved",
+    "note": null,
+    "suggestedSlug": null,
+    "createdAt": "2025-12-18T18:30:17.667Z",
+    "updatedAt": "2025-12-18T18:30:52.837Z",
+    "approvedAt": "2025-12-18T18:30:52.837Z",
+    "spaceSlug": "bus"
+  },
+  {
+    "id": "wr_d06211baf2220d23c042a6961d4c1062",
+    "userId": "u_7bb27e4ad7ac448ecb1c2605695cc27b",
+    "email": "moofstudios1@gmail.com",
+    "status": "approved",
+    "note": null,
+    "suggestedSlug": null,
+    "createdAt": "2025-12-18T20:36:10.481Z",
+    "updatedAt": "2025-12-18T20:36:29.553Z",
+    "approvedAt": "2025-12-18T20:36:29.553Z",
+    "spaceSlug": "moofstudios1"
   }
 ]

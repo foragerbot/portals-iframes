@@ -43,6 +43,10 @@ import {
   TRUST_PROXY,
   PORTALS_FRAME_ANCESTORS,
   MAX_PENDING_WORKSPACE_REQUESTS,
+  FILES_META_PATH,
+  FILE_VERSIONS_META_PATH,
+  HISTORY_DIR_NAME,
+  HISTORY_BLOBS_DIR_NAME,
 } from './config.js';
 
 import { readJsonArray, writeJsonArray } from './stores/jsonStore.js';
@@ -371,6 +375,334 @@ function resolveSpacePath(space, relPath) {
   }
 
   return full;
+}
+
+// ───────────────── Per-file history + content-addressed blobs ─────────────────
+
+function normalizeRelPosix(input) {
+  const raw = String(input || '').replace(/\\/g, '/');
+  const normalized = path.posix.normalize('/' + raw);
+  const rel = normalized.replace(/^\/+/, '').replace(/\/+$/, '');
+  return rel || '.'; // '.' means "space root"
+}
+
+function isHistoryRelPath(relPosix) {
+  const rel = normalizeRelPosix(relPosix);
+  return (
+    rel === HISTORY_DIR_NAME ||
+    rel.startsWith(HISTORY_DIR_NAME + '/') ||
+    rel.includes('/' + HISTORY_DIR_NAME + '/')
+  );
+}
+
+function assertNotHistoryPath(relPosix) {
+  if (isHistoryRelPath(relPosix)) {
+    throw Object.assign(new Error('reserved_path'), { status: 404 });
+  }
+}
+
+function resolveLiveSpacePath(space, relPath) {
+  const rel = normalizeRelPosix(relPath);
+  assertNotHistoryPath(rel);
+  return resolveSpacePath(space, rel);
+}
+
+function sha256Text(text) {
+  return crypto.createHash('sha256').update(String(text || ''), 'utf8').digest('hex');
+}
+
+async function ensureHistoryDirs(space) {
+  const blobsDir = resolveSpacePath(
+    space,
+    `${HISTORY_DIR_NAME}/${HISTORY_BLOBS_DIR_NAME}`
+  );
+  await fs.mkdir(blobsDir, { recursive: true });
+  return blobsDir;
+}
+
+async function ensureBlobForText(space, sha256, text) {
+  await ensureHistoryDirs(space);
+
+  const blobPath = resolveSpacePath(
+    space,
+    `${HISTORY_DIR_NAME}/${HISTORY_BLOBS_DIR_NAME}/${sha256}`
+  );
+
+  try {
+    // 'wx' => create if missing, fail if exists (prevents overwriting)
+    await fs.writeFile(blobPath, String(text || ''), { encoding: 'utf8', flag: 'wx' });
+  } catch (err) {
+    if (err.code !== 'EEXIST') throw err;
+  }
+
+  return blobPath;
+}
+
+async function loadFilesMeta() {
+  return readJsonArray(FILES_META_PATH);
+}
+
+async function saveFilesMeta(arr) {
+  return writeJsonArray(FILES_META_PATH, arr);
+}
+
+async function loadFileVersionsMeta() {
+  return readJsonArray(FILE_VERSIONS_META_PATH);
+}
+
+async function saveFileVersionsMeta(arr) {
+  return writeJsonArray(FILE_VERSIONS_META_PATH, arr);
+}
+
+function findActiveFileRecordByPath(filesMeta, spaceSlug, relPath) {
+  const p = normalizeRelPosix(relPath);
+  return filesMeta.find(
+    (f) =>
+      f &&
+      f.spaceSlug === spaceSlug &&
+      f.deletedAt == null &&
+      f.currentPath === p
+  );
+}
+
+function findLatestVersionForFileAndSha(versionsMeta, spaceSlug, fileId, sha256) {
+  // newest-last in the array means scan from end (cheaper)
+  for (let i = versionsMeta.length - 1; i >= 0; i -= 1) {
+    const v = versionsMeta[i];
+    if (
+      v &&
+      v.spaceSlug === spaceSlug &&
+      v.fileId === fileId &&
+      v.sha256 === sha256
+    ) {
+      return v;
+    }
+  }
+  return null;
+}
+
+/**
+ * Core save pipeline:
+ * - resolve/create fileId record
+ * - (if needed) snapshot existing disk content as baseline "import" version
+ * - ensure blob exists for new content
+ * - write live file
+ * - append version record ("save")
+ * - update file record pointer to latest
+ */
+async function saveTextFileWithHistory({ space, spaceSlug, relPath, content, userId }) {
+  const nowIso = new Date().toISOString();
+  const liveRel = normalizeRelPosix(relPath);
+
+  // Block internal history writes via the normal file API
+  assertNotHistoryPath(liveRel);
+
+  const liveFullPath = resolveLiveSpacePath(space, liveRel);
+
+  // Load both meta stores once
+  const [filesMeta, versionsMeta] = await Promise.all([
+    loadFilesMeta(),
+    loadFileVersionsMeta(),
+  ]);
+
+  // Find or create file record (fileId)
+  let fileRec = findActiveFileRecordByPath(filesMeta, spaceSlug, liveRel);
+  if (!fileRec) {
+    fileRec = {
+      id: generateId('f_'),
+      spaceSlug,
+      currentPath: liveRel,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      createdByUserId: userId || null,
+
+      deletedAt: null,
+      deletedByUserId: null,
+
+      currentSha256: null,
+      currentVersionId: null,
+    };
+    filesMeta.push(fileRec);
+  }
+
+  // Compute new sha
+  const newText = String(content || '');
+  const newSha = sha256Text(newText);
+
+  // Read disk (if exists) so we can snapshot baseline before overwriting
+  let diskText = null;
+  let diskSha = null;
+  try {
+    diskText = await fs.readFile(liveFullPath, 'utf8');
+    diskSha = sha256Text(diskText);
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+
+  // Determine "current" sha if we have it (meta > disk)
+  const effectiveCurrentSha = fileRec.currentSha256 || diskSha;
+
+  // If nothing changed, we usually don't create a new version
+  if (effectiveCurrentSha && effectiveCurrentSha === newSha) {
+    // If meta was empty (legacy adoption), finalize it with a baseline version record.
+    if (!fileRec.currentSha256) {
+      await ensureBlobForText(space, newSha, diskText ?? newText);
+
+      const existing = findLatestVersionForFileAndSha(
+        versionsMeta,
+        spaceSlug,
+        fileRec.id,
+        newSha
+      );
+
+      const baseline = existing || {
+        id: generateId('fv_'),
+        fileId: fileRec.id,
+        spaceSlug,
+        sha256: newSha,
+        action: diskSha ? 'import' : 'save',
+        path: liveRel,
+        createdAt: nowIso,
+        createdByUserId: userId || null,
+        sizeBytes: Buffer.byteLength(diskText ?? newText, 'utf8'),
+      };
+
+      if (!existing) versionsMeta.push(baseline);
+
+      fileRec.currentSha256 = newSha;
+      fileRec.currentVersionId = baseline.id;
+      fileRec.updatedAt = nowIso;
+
+      await Promise.all([saveFilesMeta(filesMeta), saveFileVersionsMeta(versionsMeta)]);
+    }
+
+    // Ensure the live file exists (edge case: meta says it exists but disk file missing)
+    if (diskSha == null) {
+      await fs.mkdir(path.dirname(liveFullPath), { recursive: true });
+      await fs.writeFile(liveFullPath, newText, 'utf8');
+    }
+
+    return { ok: true, changed: false, fileId: fileRec.id, sha256: newSha, versionId: fileRec.currentVersionId };
+  }
+
+  // If we have disk content but no recorded sha yet, snapshot it as baseline ("import")
+  if (!fileRec.currentSha256 && diskSha) {
+    await ensureBlobForText(space, diskSha, diskText);
+
+    const existingBaseline = findLatestVersionForFileAndSha(
+      versionsMeta,
+      spaceSlug,
+      fileRec.id,
+      diskSha
+    );
+
+    const baselineVer = existingBaseline || {
+      id: generateId('fv_'),
+      fileId: fileRec.id,
+      spaceSlug,
+      sha256: diskSha,
+      action: 'import',
+      path: liveRel,
+      createdAt: nowIso,
+      createdByUserId: userId || null,
+      sizeBytes: Buffer.byteLength(diskText, 'utf8'),
+    };
+
+    if (!existingBaseline) versionsMeta.push(baselineVer);
+
+    fileRec.currentSha256 = diskSha;
+    fileRec.currentVersionId = baselineVer.id;
+  }
+
+  // Ensure blob exists for new content
+  await ensureBlobForText(space, newSha, newText);
+
+  // Write live file
+  await fs.mkdir(path.dirname(liveFullPath), { recursive: true });
+  await fs.writeFile(liveFullPath, newText, 'utf8');
+
+  // Append version record
+  const versionId = generateId('fv_');
+  versionsMeta.push({
+    id: versionId,
+    fileId: fileRec.id,
+    spaceSlug,
+    sha256: newSha,
+    action: 'save',
+    path: liveRel,
+    createdAt: nowIso,
+    createdByUserId: userId || null,
+    sizeBytes: Buffer.byteLength(newText, 'utf8'),
+  });
+
+  // Update file pointer
+  fileRec.currentSha256 = newSha;
+  fileRec.currentVersionId = versionId;
+  fileRec.updatedAt = nowIso;
+
+  await Promise.all([saveFilesMeta(filesMeta), saveFileVersionsMeta(versionsMeta)]);
+
+  return { ok: true, changed: true, fileId: fileRec.id, sha256: newSha, versionId };
+}
+
+async function markFileDeletedInMeta({ spaceSlug, relPath, userId }) {
+  const nowIso = new Date().toISOString();
+  const p = normalizeRelPosix(relPath);
+  assertNotHistoryPath(p);
+
+  const filesMeta = await loadFilesMeta();
+  const rec = findActiveFileRecordByPath(filesMeta, spaceSlug, p);
+  if (!rec) return { ok: true, found: false };
+
+  rec.deletedAt = nowIso;
+  rec.deletedByUserId = userId || null;
+  rec.updatedAt = nowIso;
+
+  await saveFilesMeta(filesMeta);
+  return { ok: true, found: true, fileId: rec.id };
+}
+
+async function renameFilePathInMeta({ spaceSlug, fromPath, toPath, userId }) {
+  const nowIso = new Date().toISOString();
+  const from = normalizeRelPosix(fromPath);
+  const to = normalizeRelPosix(toPath);
+
+  assertNotHistoryPath(from);
+  assertNotHistoryPath(to);
+
+  const filesMeta = await loadFilesMeta();
+
+  // Find existing active record; if missing, create a new one so the renamed file has a fileId
+  let rec = findActiveFileRecordByPath(filesMeta, spaceSlug, from);
+  if (!rec) {
+    rec = {
+      id: generateId('f_'),
+      spaceSlug,
+      currentPath: from,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      createdByUserId: userId || null,
+
+      deletedAt: null,
+      deletedByUserId: null,
+
+      currentSha256: null,
+      currentVersionId: null,
+    };
+    filesMeta.push(rec);
+  }
+
+  // Prevent path collision in meta (should be rare; disk check already prevents overwriting)
+  const collision = findActiveFileRecordByPath(filesMeta, spaceSlug, to);
+  if (collision && collision.id !== rec.id) {
+    throw Object.assign(new Error('target_exists'), { status: 409 });
+  }
+
+  rec.currentPath = to;
+  rec.updatedAt = nowIso;
+
+  await saveFilesMeta(filesMeta);
+  return { ok: true, fileId: rec.id };
 }
 
 function isEditableTextFile(filePath) {
@@ -803,6 +1135,179 @@ async function sendWorkspaceApprovalEmailToUser(user, spaceRecord, requestRecord
   }
 }
 
+//history helpers
+function isValidSha256Hex(s) {
+  return typeof s === 'string' && /^[a-f0-9]{64}$/.test(s);
+}
+
+function findFileRecordByIdAnyStatus(filesMeta, spaceSlug, fileId) {
+  return filesMeta.find((f) => f && f.spaceSlug === spaceSlug && f.id === fileId) || null;
+}
+
+function findFileRecordByPathAnyStatus(filesMeta, spaceSlug, relPath) {
+  const p = normalizeRelPosix(relPath);
+  return filesMeta.find((f) => f && f.spaceSlug === spaceSlug && f.currentPath === p) || null;
+}
+
+function findActiveFileRecordByPathAnyStatusAllowed(filesMeta, spaceSlug, relPath) {
+  // “active record” here means: the record exists (even if deleted) but path matches.
+  // We still block internal history paths at the caller level.
+  return findFileRecordByPathAnyStatus(filesMeta, spaceSlug, relPath);
+}
+
+function findVersionById(versionsMeta, spaceSlug, versionId) {
+  return versionsMeta.find((v) => v && v.spaceSlug === spaceSlug && v.id === versionId) || null;
+}
+
+function listVersionsForFile(versionsMeta, spaceSlug, fileId) {
+  const out = versionsMeta
+    .filter((v) => v && v.spaceSlug === spaceSlug && v.fileId === fileId)
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  return out;
+}
+
+async function readHistoryBlobText(space, sha256) {
+  if (!isValidSha256Hex(sha256)) {
+    throw Object.assign(new Error('bad_sha'), { status: 400 });
+  }
+
+  const blobPath = resolveSpacePath(
+    space,
+    `${HISTORY_DIR_NAME}/${HISTORY_BLOBS_DIR_NAME}/${sha256}`
+  );
+
+  const text = await fs.readFile(blobPath, 'utf8').catch((err) => {
+    if (err.code === 'ENOENT') {
+      throw Object.assign(new Error('blob_missing'), { status: 404 });
+    }
+    throw err;
+  });
+
+  return text;
+}
+
+/**
+ * Restore a historical version into a live file path.
+ * - Keeps the same fileId (even if the file was deleted)
+ * - Overwrites ONLY if restoring into the same file record’s currentPath
+ * - Creates a new version record with action: "restore"
+ */
+async function restoreFileVersionToLive({ space, spaceSlug, versionId, toPath, userId }) {
+  const nowIso = new Date().toISOString();
+
+  const [filesMeta, versionsMeta] = await Promise.all([
+    loadFilesMeta(),
+    loadFileVersionsMeta(),
+  ]);
+
+  const ver = findVersionById(versionsMeta, spaceSlug, versionId);
+  if (!ver) throw Object.assign(new Error('version_not_found'), { status: 404 });
+
+  const sha = ver.sha256;
+  if (!isValidSha256Hex(sha)) throw Object.assign(new Error('bad_sha'), { status: 400 });
+
+  // Read content from blob (source of truth)
+  const content = await readHistoryBlobText(space, sha);
+
+  // Find or create file record by fileId (KEEP SAME FILEID)
+  let fileRec = findFileRecordByIdAnyStatus(filesMeta, spaceSlug, ver.fileId);
+  if (!fileRec) {
+    fileRec = {
+      id: ver.fileId,
+      spaceSlug,
+      currentPath: normalizeRelPosix(ver.path || 'restored.txt'),
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      createdByUserId: userId || null,
+      deletedAt: null,
+      deletedByUserId: null,
+      currentSha256: null,
+      currentVersionId: null,
+    };
+    filesMeta.push(fileRec);
+  }
+
+  // Pick destination path
+  const destRel = normalizeRelPosix(
+    toPath ? String(toPath) : (fileRec.currentPath || ver.path || 'restored.txt')
+  );
+
+  // Never allow restoring into history
+  assertNotHistoryPath(destRel);
+
+  // Block meta collision with a DIFFERENT active file record
+  const collision = filesMeta.find(
+    (f) =>
+      f &&
+      f.spaceSlug === spaceSlug &&
+      f.deletedAt == null &&
+      f.currentPath === destRel &&
+      f.id !== fileRec.id
+  );
+  if (collision) throw Object.assign(new Error('target_exists'), { status: 409 });
+
+  const destFullPath = resolveLiveSpacePath(space, destRel);
+
+  // Disk overwrite rules:
+  // - If the live file exists AND it’s the same file record’s currentPath (and not deleted), allow overwrite.
+  // - Otherwise, block overwrite.
+  const diskExists = await fs
+    .stat(destFullPath)
+    .then((s) => !!s && s.isFile())
+    .catch((err) => {
+      if (err.code === 'ENOENT') return false;
+      throw err;
+    });
+
+  const isOverwritingSameLiveFile =
+    diskExists && fileRec.deletedAt == null && fileRec.currentPath === destRel;
+
+  if (diskExists && !isOverwritingSameLiveFile) {
+    throw Object.assign(new Error('target_exists'), { status: 409 });
+  }
+
+  // Ensure blob exists (safe no-op if already there)
+  await ensureBlobForText(space, sha, content);
+
+  // Write live file
+  await fs.mkdir(path.dirname(destFullPath), { recursive: true });
+  await fs.writeFile(destFullPath, content, 'utf8');
+
+  // Create restore version record (so restore itself is part of history)
+  const newVersionId = generateId('fv_');
+  versionsMeta.push({
+    id: newVersionId,
+    fileId: fileRec.id,
+    spaceSlug,
+    sha256: sha,
+    action: 'restore',
+    path: destRel,
+    createdAt: nowIso,
+    createdByUserId: userId || null,
+    sizeBytes: Buffer.byteLength(content, 'utf8'),
+    restoredFromVersionId: ver.id,
+  });
+
+  // Update file pointer + undelete if needed
+  fileRec.currentPath = destRel;
+  fileRec.deletedAt = null;
+  fileRec.deletedByUserId = null;
+  fileRec.currentSha256 = sha;
+  fileRec.currentVersionId = newVersionId;
+  fileRec.updatedAt = nowIso;
+
+  await Promise.all([saveFilesMeta(filesMeta), saveFileVersionsMeta(versionsMeta)]);
+
+  return {
+    ok: true,
+    fileId: fileRec.id,
+    path: destRel,
+    sha256: sha,
+    versionId: newVersionId,
+    restoredFromVersionId: ver.id,
+  };
+}
+
 // Attach req.user + req.session if sid cookie exists
 async function sessionMiddleware(req, res, next) {
   try {
@@ -1172,6 +1677,160 @@ function requireEditorOrigin(req, res, next) {
   next();
 }
 
+// List history versions for a file (by fileId OR current path)
+// GET /api/spaces/:slug/file/history?fileId=...&limit=...
+// GET /api/spaces/:slug/file/history?path=...&limit=...
+app.get('/api/spaces/:slug/file/history', requireUser, async (req, res, next) => {
+  try {
+    await ensureSpacesRoot();
+
+    const { slug } = req.params;
+    if (!isValidSlug(slug)) return res.status(400).json({ error: 'bad_slug' });
+
+    const space = await getUserSpaceBySlug(slug, req.user);
+    if (!space) return res.status(404).json({ error: 'space_not_found' });
+
+    const fileId = (req.query?.fileId || '').toString().trim();
+    const pathRaw = (req.query?.path || '').toString().trim();
+
+    const limitRaw = Number(req.query?.limit || 100);
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(500, limitRaw)) : 100;
+
+    const filesMeta = await loadFilesMeta();
+    let fileRec = null;
+
+    if (fileId) {
+      fileRec = findFileRecordByIdAnyStatus(filesMeta, slug, fileId);
+    } else if (pathRaw) {
+      const p = normalizeRelPosix(pathRaw);
+      if (isHistoryRelPath(p)) return res.status(404).json({ error: 'not_found' });
+      fileRec = findActiveFileRecordByPathAnyStatusAllowed(filesMeta, slug, p);
+    } else {
+      return res.status(400).json({ error: 'missing_fileId_or_path' });
+    }
+
+    if (!fileRec) {
+      return res.json({
+        ok: true,
+        tracked: false,
+        file: null,
+        versions: [],
+        message: 'No history yet for this file (save it once to start tracking).',
+      });
+    }
+
+    const versionsMeta = await loadFileVersionsMeta();
+    const versions = listVersionsForFile(versionsMeta, slug, fileRec.id)
+      .slice(0, limit)
+      .map((v) => ({
+        id: v.id,
+        createdAt: v.createdAt,
+        action: v.action,
+        sha256: v.sha256,
+        sizeBytes: v.sizeBytes,
+        path: v.path,
+        createdByUserId: v.createdByUserId || null,
+        restoredFromVersionId: v.restoredFromVersionId || null,
+      }));
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      ok: true,
+      tracked: true,
+      file: {
+        id: fileRec.id,
+        currentPath: fileRec.currentPath,
+        deletedAt: fileRec.deletedAt || null,
+        currentSha256: fileRec.currentSha256 || null,
+        currentVersionId: fileRec.currentVersionId || null,
+        createdAt: fileRec.createdAt,
+        updatedAt: fileRec.updatedAt,
+      },
+      versions,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Fetch a single version’s content (from blob)
+// GET /api/spaces/:slug/file/version?versionId=...
+app.get('/api/spaces/:slug/file/version', requireUser, async (req, res, next) => {
+  try {
+    await ensureSpacesRoot();
+
+    const { slug } = req.params;
+    if (!isValidSlug(slug)) return res.status(400).json({ error: 'bad_slug' });
+
+    const space = await getUserSpaceBySlug(slug, req.user);
+    if (!space) return res.status(404).json({ error: 'space_not_found' });
+
+    const versionId = (req.query?.versionId || '').toString().trim();
+    if (!versionId) return res.status(400).json({ error: 'missing_versionId' });
+
+    const versionsMeta = await loadFileVersionsMeta();
+    const ver = findVersionById(versionsMeta, slug, versionId);
+    if (!ver) return res.status(404).json({ error: 'version_not_found' });
+
+    const content = await readHistoryBlobText(space, ver.sha256);
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      ok: true,
+      version: {
+        id: ver.id,
+        fileId: ver.fileId,
+        createdAt: ver.createdAt,
+        action: ver.action,
+        sha256: ver.sha256,
+        sizeBytes: ver.sizeBytes,
+        path: ver.path,
+        createdByUserId: ver.createdByUserId || null,
+        restoredFromVersionId: ver.restoredFromVersionId || null,
+      },
+      content,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Restore a version into the live file
+// POST /api/spaces/:slug/file/restore
+// body: { versionId, toPath? }
+app.post('/api/spaces/:slug/file/restore', requireUser, requireEditorOrigin, async (req, res, next) => {
+  try {
+    await ensureSpacesRoot();
+
+    const { slug } = req.params;
+    if (!isValidSlug(slug)) return res.status(400).json({ error: 'bad_slug' });
+
+    const { versionId, toPath } = req.body || {};
+    if (!versionId || typeof versionId !== 'string') {
+      return res.status(400).json({ error: 'missing_versionId' });
+    }
+
+    const space = await getUserSpaceBySlug(slug, req.user);
+    if (!space) return res.status(404).json({ error: 'space_not_found' });
+
+    const result = await restoreFileVersionToLive({
+      space,
+      spaceSlug: slug,
+      versionId: versionId.trim(),
+      toPath: toPath ? String(toPath) : null,
+      userId: req.user?.id || null,
+    });
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(result);
+  } catch (err) {
+    if (err.message === 'version_not_found') return res.status(404).json({ error: 'version_not_found' });
+    if (err.message === 'blob_missing') return res.status(404).json({ error: 'blob_missing' });
+    if (err.message === 'target_exists') return res.status(409).json({ error: 'target_exists' });
+    next(err);
+  }
+});
+
 // List files in a space directory
 // GET /api/spaces/:slug/files?path=subdir/
 app.get('/api/spaces/:slug/files', requireUser, async (req, res, next) => {
@@ -1179,50 +1838,43 @@ app.get('/api/spaces/:slug/files', requireUser, async (req, res, next) => {
     await ensureSpacesRoot();
 
     const slug = String(req.params.slug || '');
-    const relPath =
+    const relPathRaw =
       typeof req.query.path === 'string' && req.query.path.trim()
         ? req.query.path.trim()
         : '.';
 
-    if (!isValidSlug(slug)) {
-      return res.status(400).json({ error: 'bad_slug' });
+    const relPath = normalizeRelPosix(relPathRaw);
+
+    if (!isValidSlug(slug)) return res.status(400).json({ error: 'bad_slug' });
+
+    // Never allow browsing internal history
+    if (isHistoryRelPath(relPath)) {
+      return res.status(404).json({ error: 'not_found' });
     }
 
     const space = await getUserSpaceBySlug(slug, req.user);
-    if (!space) {
-      return res.status(404).json({ error: 'space_not_found' });
-    }
+    if (!space) return res.status(404).json({ error: 'space_not_found' });
 
-    const dirPath = resolveSpacePath(space, relPath);
+    const dirPath = resolveLiveSpacePath(space, relPath);
 
     let dirents;
     try {
       dirents = await fs.readdir(dirPath, { withFileTypes: true });
     } catch (err) {
-      // Directory doesn't exist yet? Treat as empty (nice UX for assets/)
-      if (err.code === 'ENOENT') {
-        return res.json({ ok: true, path: relPath, items: [] });
-      }
-      // Path exists but isn't a directory
-      if (err.code === 'ENOTDIR') {
-        return res.status(400).json({ error: 'not_a_directory' });
-      }
+      if (err.code === 'ENOENT') return res.json({ ok: true, path: relPathRaw, items: [] });
+      if (err.code === 'ENOTDIR') return res.status(400).json({ error: 'not_a_directory' });
       throw err;
     }
 
     const itemsRaw = await Promise.all(
       dirents.map(async (d) => {
-        const full = path.join(dirPath, d.name);
+        // hide .history always (should only appear at root, but belt+suspenders)
+        if (d.name === HISTORY_DIR_NAME) return null;
 
-        // File might vanish between readdir and stat; skip if so
+        const full = path.join(dirPath, d.name);
         try {
           const stat = await fs.stat(full);
-          return {
-            name: d.name,
-            isDir: d.isDirectory(),
-            size: stat.size,
-            mtime: stat.mtime,
-          };
+          return { name: d.name, isDir: d.isDirectory(), size: stat.size, mtime: stat.mtime };
         } catch (err) {
           if (err.code === 'ENOENT') return null;
           throw err;
@@ -1231,14 +1883,12 @@ app.get('/api/spaces/:slug/files', requireUser, async (req, res, next) => {
     );
 
     const items = itemsRaw.filter(Boolean);
-
-    // Optional: stable sort (dirs first, then alphabetical)
     items.sort((a, b) => {
       if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
       return a.name.localeCompare(b.name);
     });
 
-    res.json({ ok: true, path: relPath, items });
+    res.json({ ok: true, path: relPathRaw, items });
   } catch (err) {
     next(err);
   }
@@ -1250,41 +1900,36 @@ app.get('/api/spaces/:slug/files', requireUser, async (req, res, next) => {
 app.get('/api/spaces/:slug/file', requireUser, async (req, res, next) => {
   try {
     await ensureSpacesRoot();
-    const { slug } = req.params;
-    const relPath = req.query.path;
 
-    if (!isValidSlug(slug)) {
-      return res.status(400).json({ error: 'bad_slug' });
-    }
-    if (!relPath) {
-      return res.status(400).json({ error: 'missing_path' });
+    const { slug } = req.params;
+    const relPathRaw = req.query.path;
+
+    if (!isValidSlug(slug)) return res.status(400).json({ error: 'bad_slug' });
+    if (!relPathRaw) return res.status(400).json({ error: 'missing_path' });
+
+    const relPath = normalizeRelPosix(relPathRaw);
+
+    if (isHistoryRelPath(relPath)) {
+      return res.status(404).json({ error: 'not_found' });
     }
 
     const space = await getUserSpaceBySlug(slug, req.user);
-    if (!space) {
-      return res.status(404).json({ error: 'space_not_found' });
-    }
+    if (!space) return res.status(404).json({ error: 'space_not_found' });
 
-    const filePath = resolveSpacePath(space, relPath);
+    const filePath = resolveLiveSpacePath(space, relPath);
 
     if (!isEditableTextFile(filePath)) {
       return res.status(400).json({ error: 'unsupported_type' });
     }
 
     const content = await fs.readFile(filePath, 'utf8');
-
-    res.json({
-      ok: true,
-      path: relPath,
-      content,
-    });
+    res.json({ ok: true, path: relPathRaw, content });
   } catch (err) {
-    if (err.code === 'ENOENT') {
-      return res.status(404).json({ error: 'file_not_found' });
-    }
+    if (err.code === 'ENOENT') return res.status(404).json({ error: 'file_not_found' });
     next(err);
   }
 });
+
 
 // Save a text file in a space
 // POST /api/spaces/:slug/file
@@ -1292,81 +1937,44 @@ app.get('/api/spaces/:slug/file', requireUser, async (req, res, next) => {
 app.post('/api/spaces/:slug/file', requireUser, requireEditorOrigin, async (req, res, next) => {
   try {
     await ensureSpacesRoot();
-    const { slug } = req.params;
-    const { path: relPath, content } = req.body || {};
 
-    if (!isValidSlug(slug)) {
-      return res.status(400).json({ error: 'bad_slug' });
-    }
-    if (!relPath || typeof content !== 'string') {
+    const { slug } = req.params;
+    const { path: relPathRaw, content } = req.body || {};
+
+    if (!isValidSlug(slug)) return res.status(400).json({ error: 'bad_slug' });
+    if (!relPathRaw || typeof content !== 'string') {
       return res.status(400).json({ error: 'missing_fields' });
     }
 
-    const space = await getUserSpaceBySlug(slug, req.user);
-    if (!space) {
-      return res.status(404).json({ error: 'space_not_found' });
+    const relPath = normalizeRelPosix(relPathRaw);
+    if (isHistoryRelPath(relPath)) {
+      return res.status(404).json({ error: 'not_found' });
     }
 
-    const filePath = resolveSpacePath(space, relPath);
+    const space = await getUserSpaceBySlug(slug, req.user);
+    if (!space) return res.status(404).json({ error: 'space_not_found' });
 
-    if (!isEditableTextFile(filePath)) {
+    const livePath = resolveLiveSpacePath(space, relPath);
+
+    if (!isEditableTextFile(livePath)) {
       return res.status(400).json({ error: 'unsupported_type' });
     }
 
-    // Ensure parent directories exist
-    const dirName = path.dirname(filePath);
-    await fs.mkdir(dirName, { recursive: true });
-    // ── Enforce quota on editor saves too (not just uploads)
-    const quotaMb = Number.isFinite(Number(space.quotaMb))
-      ? Number(space.quotaMb)
-      : 100;
-    const quotaBytes = quotaMb * 1024 * 1024;
-
-    // Current usage on disk
-    let currentBytes = 0;
-    try {
-      currentBytes = await getDirSizeBytes(space.dirPath);
-    } catch (err) {
-      if (err.code !== 'ENOENT') throw err;
-      currentBytes = 0;
-    }
-
-    // If overwriting an existing file, subtract its current size
-    let existingBytes = 0;
-    try {
-      existingBytes = (await fs.stat(filePath)).size;
-    } catch (err) {
-      if (err.code !== 'ENOENT') throw err;
-      existingBytes = 0;
-    }
-
-    const newBytes = Buffer.byteLength(content, 'utf8');
-    const projectedBytes = Math.max(0, currentBytes - existingBytes) + newBytes;
-
-    if (projectedBytes > quotaBytes) {
-      const deltaBytes = newBytes - existingBytes;
-
-      return res.status(413).json({
-        error: 'quota_exceeded',
-        message: `Save would exceed quota of ${quotaMb} MB`,
-        quotaMb,
-        currentMb: +(currentBytes / (1024 * 1024)).toFixed(2),
-        deltaMb: +(deltaBytes / (1024 * 1024)).toFixed(2),
-      });
-    }
-
-    await fs.writeFile(filePath, content, 'utf8');
-
-    // Keep meta in sync (best-effort)
-    try {
-      await updateSpaceSizeBytes(space, projectedBytes);
-    } catch (err) {
-      console.warn('[spaces] failed to update size meta after save:', err.message);
-    }
+    const result = await saveTextFileWithHistory({
+      space,
+      spaceSlug: slug,
+      relPath,
+      content,
+      userId: req.user?.id || null,
+    });
 
     res.json({
       ok: true,
-      path: relPath,
+      path: relPathRaw,
+      fileId: result.fileId,
+      sha256: result.sha256,
+      versionId: result.versionId,
+      changed: result.changed,
     });
   } catch (err) {
     next(err);
@@ -1379,47 +1987,46 @@ app.post('/api/spaces/:slug/file', requireUser, requireEditorOrigin, async (req,
 app.delete('/api/spaces/:slug/file', requireUser, requireEditorOrigin, async (req, res, next) => {
   try {
     await ensureSpacesRoot();
-    const { slug } = req.params;
-    const { path: relPath } = req.body || {};
 
-    if (!isValidSlug(slug)) {
-      return res.status(400).json({ error: 'bad_slug' });
-    }
-    if (!relPath) {
-      return res.status(400).json({ error: 'missing_path' });
-    }
+    const { slug } = req.params;
+    const { path: relPathRaw } = req.body || {};
+
+    if (!isValidSlug(slug)) return res.status(400).json({ error: 'bad_slug' });
+    if (!relPathRaw) return res.status(400).json({ error: 'missing_path' });
+
+    const relPath = normalizeRelPosix(relPathRaw);
+    if (isHistoryRelPath(relPath)) return res.status(404).json({ error: 'not_found' });
 
     const space = await getUserSpaceBySlug(slug, req.user);
-    if (!space) {
-      return res.status(404).json({ error: 'space_not_found' });
-    }
+    if (!space) return res.status(404).json({ error: 'space_not_found' });
 
-    const filePath = resolveSpacePath(space, relPath);
+    const filePath = resolveLiveSpacePath(space, relPath);
 
-    // optional: only allow deleting editable text files
     if (!isEditableTextFile(filePath)) {
       return res.status(400).json({ error: 'unsupported_type' });
     }
 
     await fs.unlink(filePath).catch((err) => {
-      if (err.code === 'ENOENT') {
-        throw Object.assign(new Error('file_not_found'), { status: 404 });
-      }
+      if (err.code === 'ENOENT') throw Object.assign(new Error('file_not_found'), { status: 404 });
       throw err;
     });
 
-    // You could update stored quota here, but we recompute on demand via usage,
-    // so it's fine to skip.
+    await markFileDeletedInMeta({
+      spaceSlug: slug,
+      relPath,
+      userId: req.user?.id || null,
+    });
 
-    res.json({ ok: true, path: relPath });
+    res.json({ ok: true, path: relPathRaw });
   } catch (err) {
-    if (err.message === 'file_not_found') {
-      return res.status(404).json({ error: 'file_not_found' });
-    }
+    if (err.message === 'file_not_found') return res.status(404).json({ error: 'file_not_found' });
     next(err);
   }
 });
 
+// Rename a file in a space
+// POST /api/spaces/:slug/file/rename
+// body: { from, to }
 // Rename a file in a space
 // POST /api/spaces/:slug/file/rename
 // body: { from, to }
@@ -1429,50 +2036,49 @@ app.post('/api/spaces/:slug/file/rename', requireUser, requireEditorOrigin, asyn
     const { slug } = req.params;
     const { from, to } = req.body || {};
 
-    if (!isValidSlug(slug)) {
-      return res.status(400).json({ error: 'bad_slug' });
-    }
-    if (!from || !to) {
-      return res.status(400).json({ error: 'missing_fields' });
-    }
+    if (!isValidSlug(slug)) return res.status(400).json({ error: 'bad_slug' });
+    if (!from || !to) return res.status(400).json({ error: 'missing_fields' });
 
     const space = await getUserSpaceBySlug(slug, req.user);
-    if (!space) {
-      return res.status(404).json({ error: 'space_not_found' });
-    }
+    if (!space) return res.status(404).json({ error: 'space_not_found' });
 
-    // Normalize names (no subdirs for now, just simple filenames)
-    const fromName = from.trim();
-    const toName = to.trim();
-    if (!fromName || !toName) {
+    // Treat these as relative POSIX paths (can include subdirs)
+    const fromRel = normalizeRelPosix(String(from).trim());
+    const toRel = normalizeRelPosix(String(to).trim());
+
+    if (!fromRel || !toRel || fromRel === '.' || toRel === '.') {
       return res.status(400).json({ error: 'bad_name' });
     }
 
-    // Optional: enforce basic extension sanity
-    const ext = (toName.split('.').pop() || '').toLowerCase();
+    // Hard block internal history
+    if (isHistoryRelPath(fromRel) || isHistoryRelPath(toRel)) {
+      return res.status(404).json({ error: 'not_found' });
+    }
+
+    // Extension sanity (still applies even with subdirs)
+    const toBase = path.posix.basename(toRel);
+    const ext = (toBase.split('.').pop() || '').toLowerCase();
     const allowedExts = ['html', 'htm', 'css', 'js', 'mjs', 'json', 'txt'];
     if (!allowedExts.includes(ext)) {
       return res.status(400).json({
         error: 'unsupported_type',
-        message: 'Please use one of: .html, .css, .js, .json, .txt'
+        message: 'Please use one of: .html, .css, .js, .json, .txt',
       });
     }
 
-    const srcPath = resolveSpacePath(space, fromName);
-    const destPath = resolveSpacePath(space, toName);
+    const srcPath = resolveLiveSpacePath(space, fromRel);
+    const destPath = resolveLiveSpacePath(space, toRel);
 
     // Ensure source exists
     const srcStat = await fs.stat(srcPath).catch((err) => {
-      if (err.code === 'ENOENT') {
-        return null;
-      }
+      if (err.code === 'ENOENT') return null;
       throw err;
     });
     if (!srcStat || !srcStat.isFile()) {
       return res.status(404).json({ error: 'file_not_found' });
     }
 
-    // Prevent overwriting an existing file
+    // Prevent overwriting
     const destExists = await fs
       .stat(destPath)
       .then((s) => s && s.isFile())
@@ -1489,13 +2095,21 @@ app.post('/api/spaces/:slug/file/rename', requireUser, requireEditorOrigin, asyn
       return res.status(400).json({ error: 'unsupported_type' });
     }
 
+    // Ensure parent directory exists for dest
+    await fs.mkdir(path.dirname(destPath), { recursive: true });
+
+    // Rename on disk first (now safe because we already blocked .history)
     await fs.rename(srcPath, destPath);
 
-    res.json({
-      ok: true,
-      from: fromName,
-      to: toName
+    // Update meta path (fileId stays the same)
+    await renameFilePathInMeta({
+      spaceSlug: slug,
+      fromPath: fromRel,
+      toPath: toRel,
+      userId: req.user?.id || null,
     });
+
+    res.json({ ok: true, from: fromRel, to: toRel });
   } catch (err) {
     console.error('[files] error renaming file', err);
     next(err);
@@ -1605,6 +2219,7 @@ const PORTALS_SDK_PROD_CHEATSHEET = [
   '- PortalsSdk.closeIframe(), PortalsSdk.openAuthModal(), PortalsSdk.openBackpack()',
 ].join('\n');
 
+
 // ───────────────── GPT helper for a user space ─────────────────
 // POST /api/spaces/:slug/gpt/chat
 // body: {
@@ -1667,7 +2282,7 @@ if (filePath) {
     if (typeof fileContent === 'string' && fileContent.length) {
       content = fileContent;
     } else {
-      const fullPath = resolveSpacePath(space, filePath);
+      const fullPath = resolveLiveSpacePath(space, filePath);
       if (isEditableTextFile(fullPath)) {
         content = await fs.readFile(fullPath, 'utf8');
       }
@@ -1907,6 +2522,11 @@ app.post(
 
       // Clean up subdir (POSIX style, no ..)
       let subdir = subdirRaw || '';
+            // Never allow writing into internal history via uploads
+      if (subdir && isHistoryRelPath(subdir)) {
+        return res.status(400).json({ error: 'bad_subdir' });
+      }
+
       if (subdir) {
         subdir = subdir.replace(/\\/g, '/'); // normalize slashes
         if (subdir.startsWith('/')) subdir = subdir.slice(1);
@@ -2566,6 +3186,12 @@ app.use('/p/:slug', portalsEmbedHeaders, async (req, res, next) => {
       if (!ownerUser || !isUserPaid(ownerUser)) {
         return sendInertPublicResponse(req, res, slug);
       }
+    }
+
+          // Never serve internal history, even if it exists on disk
+    const reqRel = normalizeRelPosix(req.path || '');
+    if (isHistoryRelPath(reqRel)) {
+      return res.status(404).send('Not found');
     }
 
     // Serve the actual files

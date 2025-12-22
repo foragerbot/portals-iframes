@@ -22,12 +22,6 @@ export const PORT = Number(process.env.PORT || 4100);
 // Bind host (security hardening). Default: local-only.
 // Set LISTEN_HOST=0.0.0.0 if you intentionally want to expose it.
 export const LISTEN_HOST = process.env.LISTEN_HOST || '127.0.0.1';
-// Proxy / iframe security config
-export const TRUST_PROXY = process.env.TRUST_PROXY === '1';
-
-// CSP: allowed parents that can iframe your /p/* content.
-// Example: "https://*.portals.com https://portals.example"
-export const PORTALS_FRAME_ANCESTORS = (process.env.PORTALS_FRAME_ANCESTORS || '').trim();
 
 export const ADMIN_TOKEN = process.env.ADMIN_TOKEN || null;
 
@@ -84,3 +78,15 @@ export const GPT_RATE_MAX_PER_WINDOW = Number(process.env.GPT_RATE_MAX_PER_WINDO
 
 // Session cleanup default (used by cleanup.js)
 export const SESSION_MAX_AGE_DAYS = Number(process.env.SESSION_MAX_AGE_DAYS || 30);
+
+// Reverse proxy (Nginx) support
+export const TRUST_PROXY = process.env.TRUST_PROXY === '1';
+
+// CSP frame-ancestors for /p/* responses (space-separated list, or leave blank for "*")
+export const PORTALS_FRAME_ANCESTORS = (process.env.PORTALS_FRAME_ANCESTORS || '').trim();
+
+// Per-file history + content-addressed blob store (disk-first)
+export const FILES_META_PATH = path.join(ROOT_DIR, 'files.meta.json');
+export const FILE_VERSIONS_META_PATH = path.join(ROOT_DIR, 'fileVersions.meta.json');
+export const HISTORY_DIR_NAME = '.history';
+export const HISTORY_BLOBS_DIR_NAME = 'blobs';

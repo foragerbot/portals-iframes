@@ -7,6 +7,9 @@ import {
   getSpaceFiles,
   getSpaceFile,
   saveSpaceFile,
+  getSpaceFileHistory,
+  getSpaceFileVersion,
+  restoreSpaceFileVersion,
   getSpaceUsage,
   callSpaceGpt,
   startMagicLink,
@@ -739,6 +742,21 @@ function SpaceEditor({
 
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewReloadKey, setPreviewReloadKey] = useState(0);
+  // ───────────────── Version history modal state ─────────────────
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historySeeding, setHistorySeeding] = useState(false);
+  const [historyRestoring, setHistoryRestoring] = useState(false);
+  const [historyError, setHistoryError] = useState('');
+
+  const [historyTracked, setHistoryTracked] = useState(false);
+  const [historyFileMeta, setHistoryFileMeta] = useState(null);
+  const [historyVersions, setHistoryVersions] = useState([]);
+
+  const [historyActiveId, setHistoryActiveId] = useState(null);
+  const [historyActiveMeta, setHistoryActiveMeta] = useState(null);
+  const [historyContentLoading, setHistoryContentLoading] = useState(false);
+  const [historyContent, setHistoryContent] = useState('');
 
   const bothCodePanels = showEditor && showGpt;
 
@@ -811,6 +829,8 @@ function SpaceEditor({
     [slug]
   );
 
+  
+
   useEffect(() => {
     loadFiles();
   }, [loadFiles]);
@@ -838,6 +858,230 @@ function SpaceEditor({
     onDirtyChange?.(hasUnsavedChanges);
   }, [hasUnsavedChanges, onDirtyChange]);
 
+    const formatWhen = (iso) => {
+    if (!iso) return '';
+    try {
+      return new Date(iso).toLocaleString();
+    } catch {
+      return String(iso);
+    }
+  };
+
+  const formatBytes = (n) => {
+    const num = Number(n);
+    if (!Number.isFinite(num) || num < 0) return '—';
+    if (num < 1024) return `${num} B`;
+    const kb = num / 1024;
+    if (kb < 1024) return `${kb.toFixed(1)} KB`;
+    const mb = kb / 1024;
+    return `${mb.toFixed(2)} MB`;
+  };
+
+  const openHistoryModal = useCallback(() => {
+    if (!selectedPath) return;
+    setHistoryOpen(true);
+  }, [selectedPath]);
+
+  const closeHistoryModal = useCallback(() => {
+    if (historyLoading || historySeeding || historyRestoring) return;
+    setHistoryOpen(false);
+  }, [historyLoading, historySeeding, historyRestoring]);
+
+  const loadHistoryVersion = useCallback(
+    async (versionId) => {
+      if (!slug || !versionId) return;
+
+      setHistoryActiveId(versionId);
+      setHistoryContentLoading(true);
+      setHistoryError('');
+
+      try {
+        const data = await getSpaceFileVersion(slug, versionId);
+        setHistoryActiveMeta(data.version || null);
+        setHistoryContent(data.content || '');
+      } catch (err) {
+        console.error(err);
+        setHistoryActiveMeta(null);
+        setHistoryContent('');
+        setHistoryError(
+          err.payload?.message ||
+            err.payload?.error ||
+            'Failed to load version content.'
+        );
+      } finally {
+        setHistoryContentLoading(false);
+      }
+    },
+    [slug]
+  );
+
+  const loadHistoryList = useCallback(
+    async ({ autoSelect = true } = {}) => {
+      if (!slug || !selectedPath) return;
+
+      setHistoryLoading(true);
+      setHistoryError('');
+
+      try {
+        const data = await getSpaceFileHistory(slug, {
+          path: selectedPath,
+          limit: 200,
+        });
+
+        const versions = data.versions || [];
+        setHistoryTracked(!!data.tracked);
+        setHistoryFileMeta(data.file || null);
+        setHistoryVersions(versions);
+
+        if (!autoSelect) return;
+
+        const currentId = data.file?.currentVersionId || null;
+        const keepExisting =
+          historyActiveId && versions.some((v) => v.id === historyActiveId);
+
+        const nextId =
+          keepExisting
+            ? historyActiveId
+            : currentId && versions.some((v) => v.id === currentId)
+            ? currentId
+            : versions[0]?.id || null;
+
+        if (nextId) {
+          await loadHistoryVersion(nextId);
+        } else {
+          setHistoryActiveId(null);
+          setHistoryActiveMeta(null);
+          setHistoryContent('');
+        }
+      } catch (err) {
+        console.error(err);
+        setHistoryTracked(false);
+        setHistoryFileMeta(null);
+        setHistoryVersions([]);
+        setHistoryActiveId(null);
+        setHistoryActiveMeta(null);
+        setHistoryContent('');
+        setHistoryError(
+          err.payload?.message || err.payload?.error || 'Failed to load history.'
+        );
+      } finally {
+        setHistoryLoading(false);
+      }
+    },
+    [slug, selectedPath, historyActiveId, loadHistoryVersion]
+  );
+
+  useEffect(() => {
+    if (!historyOpen) return;
+    loadHistoryList({ autoSelect: true });
+  }, [historyOpen, selectedPath, loadHistoryList]);
+
+  const seedHistoryForFile = useCallback(async () => {
+    if (!slug || !selectedPath) return;
+
+    if (hasUnsavedChanges) {
+      const ok = window.confirm('Start tracking by saving your current unsaved changes?');
+      if (!ok) return;
+    }
+
+    setHistorySeeding(true);
+    setHistoryError('');
+
+    try {
+      // This “adopts” the current disk file into history too (backend will create an import baseline).
+      await saveSpaceFile(slug, selectedPath, fileContent);
+
+      setHasUnsavedChanges(false);
+      onUsageRefresh?.();
+
+      await loadFiles();
+      await loadHistoryList({ autoSelect: true });
+    } catch (err) {
+      console.error(err);
+      setHistoryError(
+        err.payload?.message || err.payload?.error || 'Failed to start history.'
+      );
+    } finally {
+      setHistorySeeding(false);
+    }
+  }, [slug, selectedPath, hasUnsavedChanges, fileContent, onUsageRefresh, loadFiles, loadHistoryList]);
+
+  const restoreSelectedVersion = useCallback(async () => {
+    if (!slug || !selectedPath || !historyActiveId) return;
+
+    if (hasUnsavedChanges) {
+      const ok = window.confirm('You have unsaved changes. Restoring will discard them. Continue?');
+      if (!ok) return;
+    }
+
+    const meta = historyVersions.find((v) => v.id === historyActiveId) || historyActiveMeta;
+    const label = meta ? `${meta.action} @ ${formatWhen(meta.createdAt)}` : 'this version';
+
+    const ok = window.confirm(
+      `Restore ${label} to "${selectedPath}"?\n\nThis overwrites the saved file and adds a restore entry to history.`
+    );
+    if (!ok) return;
+
+    setHistoryRestoring(true);
+    setHistoryError('');
+
+    try {
+      const result = await restoreSpaceFileVersion(slug, historyActiveId);
+
+      await loadFiles();
+
+      const nextPath = result.path || selectedPath;
+      setSelectedPath(nextPath);
+      await loadFile(nextPath);
+
+      // Clear GPT thread so it doesn’t refer to old code
+      setGptHistory([]);
+      setGptError(null);
+      setGptMeta({ model: null, sdkIncluded: false, truncated: false });
+
+      onUsageRefresh?.();
+      setHistoryOpen(false);
+    } catch (err) {
+      console.error(err);
+      const code = err.payload?.error;
+
+      let msg = err.payload?.message || err.payload?.error || 'Failed to restore version.';
+      if (err.status === 409 && code === 'target_exists') {
+        msg = 'Restore blocked: destination exists.';
+      }
+      setHistoryError(msg);
+    } finally {
+      setHistoryRestoring(false);
+    }
+  }, [
+    slug, selectedPath, historyActiveId, hasUnsavedChanges,
+    historyVersions, historyActiveMeta, formatWhen,
+    loadFiles, loadFile, onUsageRefresh
+  ]);
+
+  const useVersionInEditorBuffer = useCallback(() => {
+    if (!historyContent) return;
+
+    if (hasUnsavedChanges) {
+      const ok = window.confirm('You have unsaved changes. Replace the editor buffer anyway?');
+      if (!ok) return;
+    }
+
+    setFileContent(historyContent);
+    setHasUnsavedChanges(true);
+    setHistoryOpen(false);
+  }, [historyContent, hasUnsavedChanges]);
+
+  const copyVersionToClipboard = useCallback(async () => {
+    if (!historyContent) return;
+    try {
+      await navigator.clipboard.writeText(historyContent);
+    } catch (err) {
+      console.error(err);
+      window.prompt('Copy content:', historyContent);
+    }
+  }, [historyContent]);
+
   const handleSelectFile = (nextPath) => {
     if (nextPath === selectedPath) return;
     if (hasUnsavedChanges) {
@@ -847,7 +1091,14 @@ function SpaceEditor({
       if (!ok) return;
     }
     setSelectedPath(nextPath);
-    // reset GPT context when switching files
+    setHistoryOpen(false);
+    setHistoryError('');
+    setHistoryTracked(false);
+    setHistoryFileMeta(null);
+    setHistoryVersions([]);
+    setHistoryActiveId(null);
+    setHistoryActiveMeta(null);
+    setHistoryContent('');
     setGptHistory([]);
     setGptError(null);
     setGptMeta({ model: null, sdkIncluded: false, truncated: false });
@@ -1483,6 +1734,14 @@ function SpaceEditor({
                       >
                         Preview iFrame
                       </button>
+                      <button
+                      className="button small"
+                      type="button"
+                      onClick={openHistoryModal}
+                      disabled={!selectedPath}
+                      >
+                       History
+                      </button>
                     </div>
                     <div
                       style={{
@@ -1861,6 +2120,181 @@ function SpaceEditor({
           )}
         </div>
       </div>
+
+{/* Version history modal */}
+{historyOpen && selectedPath && (
+  <div className="preview-modal-backdrop" onClick={closeHistoryModal}>
+    <div
+      className="preview-modal preview-modal--history"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="preview-modal-header">
+        <div>
+          <div className="preview-modal-title">Version history</div>
+          <div className="preview-modal-subtitle">
+            {slug}/{selectedPath}
+          </div>
+        </div>
+        <button
+          type="button"
+          className="preview-modal-close"
+          onClick={closeHistoryModal}
+          aria-label="Close history"
+        >
+          ×
+        </button>
+      </div>
+
+      <div className="preview-modal-body preview-modal-body--history">
+        {/* Left: versions list */}
+        <div className="history-sidebar">
+          <div className="history-sidebar-actions">
+            <button
+              type="button"
+              className="button small"
+              onClick={() => loadHistoryList({ autoSelect: false })}
+              disabled={historyLoading}
+            >
+              {historyLoading ? 'Loading…' : 'Refresh'}
+            </button>
+
+            {!historyTracked && (
+              <button
+                type="button"
+                className="button small primary"
+                onClick={seedHistoryForFile}
+                disabled={historySeeding || !selectedPath}
+              >
+                {historySeeding ? 'Saving…' : 'Start history'}
+              </button>
+            )}
+          </div>
+
+          {historyError && (
+            <div style={{ fontSize: 12, color: '#f97373', marginBottom: 10 }}>
+              {historyError}
+            </div>
+          )}
+
+          {!historyTracked && !historyLoading && (
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>
+              No history yet. Click <strong>Start history</strong> to create the baseline snapshot.
+            </div>
+          )}
+
+          {historyVersions.length === 0 && !historyLoading ? (
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+              No versions found.
+            </div>
+          ) : (
+            <div className="history-version-list">
+              {historyVersions.map((v) => {
+                const isActive = v.id === historyActiveId;
+                const isCurrent = historyFileMeta?.currentVersionId === v.id;
+
+                return (
+                  <button
+                    key={v.id}
+                    type="button"
+                    onClick={() => loadHistoryVersion(v.id)}
+                    className={`history-version-btn${isActive ? ' active' : ''}`}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600 }}>
+                        {v.action}
+                        {isCurrent ? (
+                          <span className="pill pill--tiny" style={{ marginLeft: 6 }}>
+                            current
+                          </span>
+                        ) : null}
+                      </div>
+
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                        {formatBytes(v.sizeBytes)}
+                      </div>
+                    </div>
+
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                      {formatWhen(v.createdAt)}
+                    </div>
+
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>
+                      {String(v.sha256 || '').slice(0, 10)}…
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Right: preview + actions */}
+        <div className="history-main">
+          <div className="history-main-toolbar">
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+              {historyActiveMeta ? (
+                <>
+                  Viewing <strong>{historyActiveMeta.action}</strong> · {formatWhen(historyActiveMeta.createdAt)} ·{' '}
+                  {formatBytes(historyActiveMeta.sizeBytes)}
+                </>
+              ) : (
+                <>Select a version to preview.</>
+              )}
+            </div>
+
+            <div className="history-main-toolbar-actions">
+              <button
+                type="button"
+                className="button small"
+                onClick={copyVersionToClipboard}
+                disabled={!historyContent}
+              >
+                Copy
+              </button>
+
+              <button
+                type="button"
+                className="button small"
+                onClick={useVersionInEditorBuffer}
+                disabled={!historyContent}
+                title="Loads into your editor buffer (does not save)"
+              >
+                Use in editor
+              </button>
+
+              <button
+                type="button"
+                className="button small primary"
+                onClick={restoreSelectedVersion}
+                disabled={!historyActiveId || historyRestoring}
+                title="Writes this version to disk as the current saved file"
+              >
+                {historyRestoring ? 'Restoring…' : 'Restore'}
+              </button>
+            </div>
+          </div>
+
+          <div className="history-preview">
+            {historyContentLoading ? (
+              <div style={{ padding: 12, fontSize: 12, color: 'var(--text-muted)' }}>
+                Loading version…
+              </div>
+            ) : !historyContent ? (
+              <div style={{ padding: 12, fontSize: 12, color: 'var(--text-muted)' }}>
+                No content loaded.
+              </div>
+            ) : (
+              <pre>
+                <code>{historyContent}</code>
+              </pre>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+)}
+
 
       {/* Iframe preview modal */}
       {previewOpen && selectedPath && (
@@ -2714,8 +3148,8 @@ function AdminDashboard() {
           that the API expects in the <code>x-admin-token</code> header.
         </p>
 
-        <form onSubmit={handleSaveToken} style={{ marginBottom: 10, border: '1px solid var(--panel-border)', borderRadius: 8, padding: '6px 10px', background: 'var(--bg-elevated)' }}>
-          <label style={{ fontSize: 12, color: 'var(--danger)' }}>
+        <form onSubmit={handleSaveToken} style={{ marginBottom: 10, border: '1px solid var(--panel-border)', borderRadius: 8, padding: '6px 10px', background: 'var(--bg-main)' }}>
+          <label style={{ fontSize: 12, color: 'var(--ok)' }}>
             Admin Password:
             <input
               name="adminToken"
@@ -2759,11 +3193,11 @@ function AdminDashboard() {
             padding: 8,
             borderRadius: 8,
             border: '1px solid var(--panel-border)',
-            background: 'var(--bg-elevated)',
+            background: 'var(--bg-main)',
           }}
         >
-          <h2 style={{ fontSize: 14, margin: '0 0 6px', color: 'var(--accent-primary)' }}>Approved emails</h2>
-          <p style={{ fontSize: 12, color: 'var(--text-light)', margin: '0 0 8px' }}>
+          <h2 style={{ fontSize: 14, margin: '0 0 6px', color: 'var(--ok)' }}>Approved emails</h2>
+          <p style={{ fontSize: 12, color: 'var(--text-main)', margin: '0 0 8px' }}>
             Only emails on this allowlist can receive magic-link logins.
           </p>
 
@@ -2834,9 +3268,9 @@ function AdminDashboard() {
                   }}
                 >
                   <div>
-                    <span style={{ color: 'var(--text-light)' }}>{u.email}</span>
+                    <span style={{ color: 'var(--text-main)' }}>{u.email}</span>
                     {u.createdAt && (
-                      <span style={{ color: 'var(--text-light)', marginLeft: 6 }}>
+                      <span style={{ color: 'var(--text-main)', marginLeft: 6 }}>
                         · {u.createdAt}
                       </span>
                     )}
@@ -2860,12 +3294,12 @@ function AdminDashboard() {
           )}
         </div>
         {loading && (
-          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
+          <div style={{ fontSize: 12, color: 'var(--ok)', marginBottom: 8 }}>
             Loading pending requests…
           </div>
         )}
         {statusMsg && (
-          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 }}>
+          <div style={{ fontSize: 12, color: 'var(--danger)', marginBottom: 4 }}>
             {statusMsg}
           </div>
         )}
@@ -2876,7 +3310,7 @@ function AdminDashboard() {
         )}
 
         {requests.length === 0 && !loading ? (
-          <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+          <div style={{ fontSize: 13, color: 'var(--ok)' }}>
             No pending requests.
           </div>
         ) : (

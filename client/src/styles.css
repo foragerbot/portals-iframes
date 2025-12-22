@@ -1149,6 +1149,122 @@ body {
 }
 
 /* ────────────────────────────────────────────
+   Version history modal
+   ──────────────────────────────────────────── */
+
+.preview-modal--history {
+  width: min(1100px, 96vw);
+  height: min(78vh, 760px);
+  max-height: 90vh; /* keep your existing safety cap */
+}
+
+.preview-modal-body--history {
+  /* override the centering behavior from .preview-modal-body */
+  align-items: stretch;
+  justify-content: stretch;
+
+  padding: 12px;
+  gap: 12px;
+
+  /* we want the body to be a real layout container */
+  overflow: hidden;
+}
+
+/* Left column (versions list) */
+.history-sidebar {
+  flex: 0 0 320px;
+  min-width: 280px;
+  border-right: 1px solid var(--panel-border);
+  padding-right: 12px;
+
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.history-sidebar-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.history-version-btn {
+  width: 100%;
+  text-align: left;
+
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--panel-border);
+  background: var(--button-alt);
+  color: var(--text-main);
+
+  cursor: pointer;
+}
+
+.history-version-btn:hover {
+  border-color: var(--accent-primary);
+}
+
+.history-version-btn.active {
+  border-color: var(--accent-primary);
+  background: var(--accent-soft);
+}
+
+/* Right column (preview + actions) */
+.history-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+
+  display: flex;
+  flex-direction: column;
+}
+
+.history-main-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.history-main-toolbar-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Preview area uses your code palette */
+.history-preview {
+  margin-top: 10px;
+
+  flex: 1 1 auto;
+  min-height: 0;
+
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  overflow: auto;
+
+  background: var(--code-bg);
+  color: var(--code-text);
+}
+
+.history-preview pre {
+  margin: 0;
+  padding: 12px;
+  white-space: pre;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    'Liberation Mono', 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.history-version-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* ────────────────────────────────────────────
    Header: user menu / theme select
    ──────────────────────────────────────────── */
 

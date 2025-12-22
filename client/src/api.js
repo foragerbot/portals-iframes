@@ -79,14 +79,42 @@ export function renameSpaceFile(slug, from, to) {
   });
 }
 
+export function getSpaceFileHistory(slug, { path, fileId, limit = 200 } = {}) {
+  const params = new URLSearchParams();
+  if (path) params.set('path', path);
+  if (fileId) params.set('fileId', fileId);
+  if (limit != null) params.set('limit', String(limit));
+
+  return request(
+    `/api/spaces/${encodeURIComponent(slug)}/file/history?${params.toString()}`
+  );
+}
+
+export function getSpaceFileVersion(slug, versionId) {
+  const params = new URLSearchParams({ versionId });
+  return request(
+    `/api/spaces/${encodeURIComponent(slug)}/file/version?${params.toString()}`
+  );
+}
+
+export function restoreSpaceFileVersion(slug, versionId, toPath = null) {
+  return request(`/api/spaces/${encodeURIComponent(slug)}/file/restore`, {
+    method: 'POST',
+    body: JSON.stringify({
+      versionId,
+      ...(toPath ? { toPath } : {}),
+    }),
+  });
+}
+
 export function getSpaceUsage(slug) {
   return request(`/api/spaces/${encodeURIComponent(slug)}/usage`);
 }
 
-export function callSpaceGpt(slug, { prompt, filePath, model = 'gpt-4.1-mini', messages = [] }) {
+export function callSpaceGpt(slug, { prompt, filePath, fileContent, model = 'gpt-4.1-mini', messages = [] }) {
   return request(`/api/spaces/${encodeURIComponent(slug)}/gpt/chat`, {
     method: 'POST',
-    body: JSON.stringify({ prompt, filePath, model, messages })
+    body: JSON.stringify({ prompt, filePath, fileContent, model, messages })
   });
 }
 
