@@ -131,3 +131,19 @@ export const FILES_META_PATH = path.join(ROOT_DIR, 'files.meta.json');
 export const FILE_VERSIONS_META_PATH = path.join(ROOT_DIR, 'fileVersions.meta.json');
 export const HISTORY_DIR_NAME = '.history';
 export const HISTORY_BLOBS_DIR_NAME = 'blobs';
+
+export const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || null;
+export const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET || null;
+export const DISCORD_REDIRECT_URI = process.env.DISCORD_REDIRECT_URI || null;
+export const DISCORD_SCOPES = (process.env.DISCORD_SCOPES || 'identify email').trim();
+export const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || null;
+export const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID || null;
+
+export const DISCORD_REQUIRED_ROLE_IDS = (process.env.DISCORD_REQUIRED_ROLE_IDS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+  export const EMAIL_VERIFY_TOKENS_META_PATH = path.join(ROOT_DIR, 'emailVerifyTokens.meta.json');
+export const EMAIL_VERIFY_TOKEN_TTL_HOURS = Number(process.env.EMAIL_VERIFY_TOKEN_TTL_HOURS || 48);
+

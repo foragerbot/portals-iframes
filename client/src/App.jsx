@@ -12,8 +12,8 @@ import {
   restoreSpaceFileVersion,
   getSpaceUsage,
   callSpaceGpt,
-  startMagicLink,
-  verifyMagicLink,
+  getAuthStatus,
+  startDiscordLogin,
   deleteSpaceFile,
   renameSpaceFile,
   uploadSpaceAssets,
@@ -26,6 +26,8 @@ import {
   adminGetApprovedUsers,
   adminAddApprovedUser,
   adminRemoveApprovedUser,
+  startEmailVerification,
+  resendEmailVerification,
 } from './api.js';
 
 import ReactMarkdown from 'react-markdown';
@@ -103,6 +105,20 @@ const IFRAME_ORIGIN = (() => {
   return cleaned || window.location.origin.replace(/\/+$/, '');
 })();
 
+function useEmailVerifiedGate({ me, loading }) {
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  useEffect(() => {
+    if (loading) return;
+    if (!me) return;
+
+    const verified = !!me?.user?.emailVerifiedAt;
+    if (!verified) {
+      navigate('/login', { replace: true, state: { from: location.pathname } });
+    }
+  }, [me, loading, navigate, location.pathname]);
+}
 function useMe() {
   const [me, setMe] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -136,109 +152,380 @@ function useMe() {
 function LoginPage() {
   const navigate = useNavigate();
 
-  const [email, setEmail] = useState('');
-  const [status, setStatus] = useState('');
+  const [auth, setAuth] = useState(null); // { loggedIn, user, ... }
   const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState('');
 
-  // Prevent double-consume in React 18 StrictMode (dev only)
-  const didConsumeRef = useRef(false);
+  const [email, setEmail] = useState(() => {
+    try {
+      return localStorage.getItem('pendingEmail') || '';
+    } catch {
+      return '';
+    }
+  });
 
-  // Auto-consume magic token from URL hash (preferred) or query (fallback)
+  const emailTrim = String(email || '').trim().toLowerCase();
+  const emailOk = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(emailTrim);
+
+  const refreshStatus = useCallback(async () => {
+    const s = await getAuthStatus();
+    setAuth(s);
+    return s;
+  }, []);
+
   useEffect(() => {
     const run = async () => {
-      const hashParams = new URLSearchParams(
-        (window.location.hash || '').replace(/^#/, '')
-      );
-      const tokenFromHash = hashParams.get('token');
-
-      const queryParams = new URLSearchParams(window.location.search || '');
-      const tokenFromQuery = queryParams.get('token');
-
-      const token = tokenFromHash || tokenFromQuery;
-      if (!token) return;
-
-      // ✅ guard against double effect execution
-      if (didConsumeRef.current) return;
-      didConsumeRef.current = true;
-
       setBusy(true);
-      setStatus('Signing you in…');
-
+      setStatus('');
       try {
-        await verifyMagicLink(token);
+        const s = await refreshStatus();
 
-        // Clear token from URL (removes hash + any ?token= fallback)
-        const cleanedSearch = window.location.search
-          .replace(/([?&])token=[^&]+(&|$)/, '$1')
-          .replace(/[?&]$/, '');
+        // If verified, go straight into the app
+        const verified =
+          !!s?.loggedIn &&
+          !!s?.user?.email &&
+          !!s?.user?.emailVerifiedAt; // NOTE: see backend tip below
 
-        window.history.replaceState(
-          null,
-          '',
-          window.location.pathname + cleanedSearch
-        );
+        if (verified) {
+          navigate('/', { replace: true });
+          return;
+        }
 
-        setStatus('Signed in. Redirecting…');
-        navigate('/', { replace: true });
+        // Prefill email from backend if present
+        const backendEmail = String(s?.user?.pendingEmail || s?.user?.email || '').trim().toLowerCase();
+        if (backendEmail) {
+          setEmail((prev) => prev || backendEmail);
+          try {
+            localStorage.setItem('pendingEmail', backendEmail);
+          } catch {}
+        }
+
+        // Nice UX when coming back from verify link
+        const qp = new URLSearchParams(window.location.search || '');
+        if (qp.get('verified') === '1') {
+          setStatus('Email verified. Entering the app…');
+          // refresh again (in case status was cached)
+          const s2 = await refreshStatus();
+          const verified2 = !!s2?.loggedIn && !!s2?.user?.email && !!s2?.user?.emailVerifiedAt;
+          if (verified2) navigate('/', { replace: true });
+        }
       } catch (err) {
         console.error(err);
-        setStatus(
-          err.payload?.message ||
-            'This login link is invalid or expired. Please request a new one.'
-        );
+        // Don’t block UI if status route hiccups
+        setAuth({ ok: true, loggedIn: false, user: null });
       } finally {
         setBusy(false);
       }
     };
-
     run();
-  }, [navigate]);
+  }, [navigate, refreshStatus]);
 
-  const onSubmit = async (e) => {
-    e.preventDefault();
-    if (!email) return;
+const onDiscord = () => {
+  setBusy(true);
+  setStatus('Opening Discord…');
+  startDiscordLogin();
+};
+
+  const onSendVerify = async () => {
+    if (!emailOk) {
+      setStatus('Please enter a valid email.');
+      return;
+    }
     setBusy(true);
-    setStatus('');
+    setStatus('Sending verification email…');
     try {
-      await startMagicLink(email);
-      setStatus('Magic link sent. Check your email and click the link to sign in.');
+      try {
+        localStorage.setItem('pendingEmail', emailTrim);
+      } catch {}
+
+      await startEmailVerification(emailTrim);
+      setStatus('Check your inbox — click the verification link to continue.');
+      await refreshStatus();
     } catch (err) {
       console.error(err);
-      setStatus(err.payload?.message || 'Failed to send magic link.');
+      setStatus(err.payload?.message || 'Failed to send verification email.');
     } finally {
       setBusy(false);
     }
   };
 
-  return (
-    <div className="login-shell">
-      <div className="login-card">
-        <h1>Sign in to Portals iFrame Builder</h1>
+  const onResend = async () => {
+    setBusy(true);
+    setStatus('Resending…');
+    try {
+      await resendEmailVerification();
+      setStatus('Sent. Check your inbox.');
+    } catch (err) {
+      console.error(err);
+      setStatus(err.payload?.message || 'Failed to resend.');
+    } finally {
+      setBusy(false);
+    }
+  };
 
-        <form onSubmit={onSubmit}>
-          <input
-            type="email"
-            placeholder="you@example.com"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            autoComplete="email"
-            required
+  const onIveVerified = async () => {
+    setBusy(true);
+    setStatus('Checking verification…');
+    try {
+      const s = await refreshStatus();
+      const verified = !!s?.loggedIn && !!s?.user?.email && !!s?.user?.emailVerifiedAt;
+      if (verified) {
+        setStatus('Verified. Entering the app…');
+        navigate('/', { replace: true });
+      } else {
+        setStatus('Not verified yet. Open the link in your email, then try again.');
+      }
+    } catch (err) {
+      console.error(err);
+      setStatus('Could not confirm verification. Try again in a moment.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const loggedIn = !!auth?.loggedIn;
+  const emailVerified = !!auth?.user?.emailVerifiedAt; // NOTE: see backend tip below
+
+  // Logged out UI
+  if (!loggedIn) {
+    return (
+      <div className="login-shell">
+        <div className="login-card">
+          <h1>Portals iFrame Builder</h1>
+
+          <p style={{ marginTop: 6, fontSize: 12, color: 'var(--text-muted)' }}>
+            Sign in with Discord. You must be in the guild and have the required role.
+          </p>
+
+          <button
+            className="button primary"
+            type="button"
+            onClick={onDiscord}
             disabled={busy}
-          />
-          <button className="button primary" type="submit" disabled={busy}>
-            {busy ? 'Working…' : 'Send magic link'}
+            style={{ marginTop: 14, width: '100%' }}
+          >
+            {busy ? 'Checking…' : 'Sign in with Discord'}
           </button>
-        </form>
 
-        <div className="login-status">{status}</div>
+          <div className="login-status" style={{ marginTop: 10 }}>
+            {status}
+          </div>
+        </div>
       </div>
-    </div>
-  );
-}
+    );
+  }
 
+  // Logged in but NOT verified → onboarding UI
+  if (!emailVerified) {
+    return (
+      <div className="login-shell">
+        <div className="login-card">
+          <h1>Verify your email</h1>
+
+          <p style={{ marginTop: 6, fontSize: 12, color: 'var(--text-muted)' }}>
+            You’re signed in with Discord as{' '}
+            <strong>{auth?.user?.discordUsername || auth?.user?.discordId || 'unknown'}</strong>.
+            <br />
+            Before you can enter the builder, verify an email for approvals + updates.
+          </p>
+
+          <div style={{ marginTop: 14 }}>
+            <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'block' }}>
+              Email
+              <input
+                type="email"
+                placeholder="you@example.com"
+                value={email}
+                onChange={(e) => {
+                  setEmail(e.target.value);
+                  if (status) setStatus('');
+                }}
+                autoComplete="email"
+                disabled={busy}
+                style={{ marginTop: 6 }}
+              />
+            </label>
+
+            {!busy && emailTrim && !emailOk && (
+              <div style={{ marginTop: 6, fontSize: 12, color: '#f97373' }}>
+                Please enter a valid email.
+              </div>
+            )}
+
+            <button
+              className="button primary"
+              type="button"
+              onClick={onSendVerify}
+              disabled={busy || !emailOk}
+              style={{ marginTop: 10, width: '100%' }}
+            >
+              {busy ? 'Working…' : 'Send verification email'}
+            </button>
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+              <button
+                className="button small"
+                type="button"
+                onClick={onResend}
+                disabled={busy}
+                style={{ flex: 1 }}
+              >
+                Resend
+              </button>
+              <button
+                className="button small"
+                type="button"
+                onClick={onIveVerified}
+                disabled={busy}
+                style={{ flex: 1 }}
+              >
+                I’ve verified — continue
+              </button>
+            </div>
+
+            <div className="login-status" style={{ marginTop: 10 }}>
+              {status}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Verified but still here (rare) → send them in
+  navigate('/', { replace: true });
+  return null;
+}
 
 function LayoutShell({ me, usage, onLogout, children }) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+
+  const email = String(me?.user?.email || '').trim();
+  const discordUsername = me?.user?.discordUsername || null;
+  const discordId = me?.user?.discordId || null;
+  const discordAvatarHash = me?.user?.discordAvatar || null;
+  const discordAvatarUrlFromApi = me?.user?.discordAvatarUrl || null;
+
+  const emailVerifiedAt = me?.user?.emailVerifiedAt || null;
+  const pendingEmail = me?.user?.pendingEmail || null;
+
+  const headerLabel =
+    (discordUsername ? `@${discordUsername}` : '') ||
+    email ||
+    'Signed in';
+
+  const discordAvatarUrl = (() => {
+    if (discordAvatarUrlFromApi) return discordAvatarUrlFromApi;
+    if (!discordId || !discordAvatarHash) return null;
+
+    const isAnimated = String(discordAvatarHash).startsWith('a_');
+    const ext = isAnimated ? 'gif' : 'png';
+    return `https://cdn.discordapp.com/avatars/${encodeURIComponent(
+      discordId
+    )}/${encodeURIComponent(discordAvatarHash)}.${ext}?size=64`;
+  })();
+
+  const closeMenus = () => setUserMenuOpen(false);
+
+  // ───────────────── Email UI state (inline verify/change) ─────────────────
+  const [emailDraft, setEmailDraft] = useState('');
+  const [emailUiStatus, setEmailUiStatus] = useState('');
+  const [emailUiBusy, setEmailUiBusy] = useState(false);
+
+  // Local mirrors so modal reflects actions immediately
+  const [pendingEmailLocal, setPendingEmailLocal] = useState(null);
+  const [emailVerifiedAtLocal, setEmailVerifiedAtLocal] = useState(null);
+
+  // Sync inputs when profile opens
+  useEffect(() => {
+    if (!profileOpen) return;
+    const initial = String(pendingEmail || email || '').trim();
+    setEmailDraft(initial);
+    setPendingEmailLocal(pendingEmail || null);
+    setEmailVerifiedAtLocal(emailVerifiedAt || null);
+    setEmailUiStatus('');
+  }, [profileOpen, email, pendingEmail, emailVerifiedAt]);
+
+  const emailTrim = String(emailDraft || '').trim().toLowerCase();
+  const emailOk = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(emailTrim);
+
+  const handleSendVerify = async () => {
+    if (!emailOk) {
+      setEmailUiStatus('Please enter a valid email.');
+      return;
+    }
+    setEmailUiBusy(true);
+    setEmailUiStatus('Sending verification email…');
+    try {
+      await startEmailVerification(emailTrim);
+      setPendingEmailLocal(emailTrim);
+      setEmailVerifiedAtLocal(null);
+      setEmailUiStatus('Sent. Check your inbox for the verification link.');
+    } catch (err) {
+      console.error(err);
+      setEmailUiStatus(err.payload?.message || 'Failed to send verification email.');
+    } finally {
+      setEmailUiBusy(false);
+    }
+  };
+
+  const handleResendVerify = async () => {
+    setEmailUiBusy(true);
+    setEmailUiStatus('Resending…');
+    try {
+      await resendEmailVerification();
+      setEmailUiStatus('Sent. Check your inbox.');
+    } catch (err) {
+      console.error(err);
+      setEmailUiStatus(err.payload?.message || 'Failed to resend.');
+    } finally {
+      setEmailUiBusy(false);
+    }
+  };
+
+  const handleCheckVerified = async () => {
+    setEmailUiBusy(true);
+    setEmailUiStatus('Checking…');
+    try {
+      const s = await getAuthStatus();
+      const verifiedAt = s?.user?.emailVerifiedAt || null;
+
+      if (verifiedAt) {
+        setEmailVerifiedAtLocal(verifiedAt);
+        setPendingEmailLocal(null);
+        setEmailUiStatus('Verified. You’re good.');
+      } else {
+        setEmailUiStatus('Not verified yet. Open the link in your email, then try again.');
+      }
+    } catch (err) {
+      console.error(err);
+      setEmailUiStatus('Could not confirm verification. Try again.');
+    } finally {
+      setEmailUiBusy(false);
+    }
+  };
+
+  // Close dropdown on outside click + Escape
+  useEffect(() => {
+    if (!userMenuOpen) return;
+
+    const onDown = (e) => {
+      const root = document.querySelector('.app-header-user');
+      if (root && !root.contains(e.target)) closeMenus();
+    };
+
+    const onKey = (e) => {
+      if (e.key === 'Escape') closeMenus();
+    };
+
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [userMenuOpen]);
 
   return (
     <div className="app-shell">
@@ -247,31 +534,57 @@ function LayoutShell({ me, usage, onLogout, children }) {
           <h1>Portals iFrame Builder</h1>
           <span>Custom Builds & Page Hosting</span>
         </div>
-        <div className="app-header-right">
-          {usage && (
-            <div className="badge-pill">
-              Space: {usage.slug} · {usage.usedMb.toFixed(2)} / {usage.quotaMb} MB
-            </div>
-          )}
 
+        <div className="app-header-right">
           {me ? (
             <div className="app-header-user">
               <button
                 type="button"
-                className="badge-pill ok badge-pill--clickable"
+                className="badge-pill ok badge-pill--clickable user-pill"
                 onClick={() => setUserMenuOpen((open) => !open)}
+                aria-haspopup="menu"
+                aria-expanded={userMenuOpen ? 'true' : 'false'}
               >
-                <span className="badge-pill-label">{me.user.email}</span>
+                {discordAvatarUrl ? (
+                  <img
+                    className="user-pill-avatar"
+                    src={discordAvatarUrl}
+                    alt=""
+                    referrerPolicy="no-referrer"
+                  />
+                ) : (
+                  <span
+                    className="user-pill-avatar user-pill-avatar--fallback"
+                    aria-hidden="true"
+                  >
+                    {(headerLabel?.[0] || '•').toUpperCase()}
+                  </span>
+                )}
+
+                <span className="user-pill-label">{headerLabel}</span>
                 <span className="badge-pill-caret">▾</span>
               </button>
 
               {userMenuOpen && (
-                <div className="user-menu">
+                <div className="user-menu" role="menu">
                   <button
                     type="button"
                     className="user-menu-item"
+                    role="menuitem"
                     onClick={() => {
-                      setUserMenuOpen(false);
+                      closeMenus();
+                      setProfileOpen(true);
+                    }}
+                  >
+                    Profile
+                  </button>
+
+                  <button
+                    type="button"
+                    className="user-menu-item"
+                    role="menuitem"
+                    onClick={() => {
+                      closeMenus();
                       onLogout && onLogout();
                     }}
                   >
@@ -285,10 +598,205 @@ function LayoutShell({ me, usage, onLogout, children }) {
           )}
         </div>
       </header>
+
       <main className="app-main">{children}</main>
+
+      {/* Profile modal */}
+      {profileOpen && me && (
+        <div
+          className="preview-modal-backdrop"
+          onClick={() => setProfileOpen(false)}
+        >
+          <div
+            className="preview-modal"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 'min(560px, 92vw)',
+              maxWidth: 560,
+              height: 'auto',
+              minHeight: 0,
+            }}
+          >
+            <div className="preview-modal-header">
+              <div>
+                <div className="preview-modal-title">Profile</div>
+                <div className="preview-modal-subtitle">Account settings</div>
+              </div>
+              <button
+                type="button"
+                className="preview-modal-close"
+                onClick={() => setProfileOpen(false)}
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="preview-modal-body" style={{ display: 'block', padding: 16 }}>
+              {/* Discord */}
+              <div className="profile-section">
+                <div className="profile-section-title">Discord</div>
+
+                <div className="profile-row">
+                  <div className="profile-avatar-row">
+                    {discordAvatarUrl ? (
+                      <img
+                        className="profile-avatar"
+                        src={discordAvatarUrl}
+                        alt=""
+                        referrerPolicy="no-referrer"
+                      />
+                    ) : (
+                      <span className="profile-avatar-fallback" aria-hidden="true">
+                        {(headerLabel?.[0] || '•').toUpperCase()}
+                      </span>
+                    )}
+
+                    <div className="profile-kv">
+                      <div className="profile-value">
+                        <strong>Username:</strong>{' '}
+                        {discordUsername ? `@${discordUsername}` : '—'}
+                      </div>
+                      <div
+                        className="profile-value"
+                        style={{ fontSize: 12, color: 'var(--text-muted)' }}
+                      >
+                        <strong>ID:</strong> {discordId || '—'}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="profile-actions">
+                    <button
+                      type="button"
+                      className="button small"
+                      onClick={() => startDiscordLogin()}
+                    >
+                      Re-auth Discord
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Email */}
+              <div className="profile-section">
+                <div className="profile-section-title">Email</div>
+
+                <div className="profile-row">
+                  <div className="profile-kv" style={{ flex: '1 1 auto' }}>
+                    <div className="profile-value">
+                      <strong>Current:</strong> {email || '—'}{' '}
+                      <span
+                        className={
+                          'profile-status-pill ' +
+                          ((emailVerifiedAtLocal || emailVerifiedAt)
+                            ? 'profile-status-pill--ok'
+                            : 'profile-status-pill--warn')
+                        }
+                      >
+                        {(emailVerifiedAtLocal || emailVerifiedAt) ? 'verified' : 'not verified'}
+                      </span>
+                    </div>
+
+                    {(pendingEmailLocal || pendingEmail) &&
+                      !(emailVerifiedAtLocal || emailVerifiedAt) && (
+                        <div
+                          className="profile-value"
+                          style={{ fontSize: 12, color: 'var(--text-muted)' }}
+                        >
+                          Pending: <code>{pendingEmailLocal || pendingEmail}</code>
+                        </div>
+                      )}
+
+                    <div style={{ marginTop: 6, fontSize: 12, color: 'var(--text-muted)' }}>
+                      Enter a new email and we’ll send a verification link.
+                    </div>
+
+                    <div className="profile-inline">
+                      <input
+                        className="profile-email-input"
+                        type="email"
+                        value={emailDraft}
+                        onChange={(e) => {
+                          setEmailDraft(e.target.value);
+                          if (emailUiStatus) setEmailUiStatus('');
+                        }}
+                        placeholder="you@example.com"
+                        autoComplete="email"
+                        disabled={emailUiBusy}
+                      />
+
+                      <button
+                        type="button"
+                        className="button small primary"
+                        onClick={handleSendVerify}
+                        disabled={emailUiBusy || !emailOk}
+                        title={!emailOk ? 'Enter a valid email' : 'Send verification email'}
+                      >
+                        {emailUiBusy ? 'Working…' : 'Send verify'}
+                      </button>
+
+                      <button
+                        type="button"
+                        className="button small"
+                        onClick={handleResendVerify}
+                        disabled={emailUiBusy || (!email && !(pendingEmailLocal || pendingEmail))}
+                      >
+                        Resend
+                      </button>
+
+                      <button
+                        type="button"
+                        className="button small"
+                        onClick={handleCheckVerified}
+                        disabled={emailUiBusy}
+                      >
+                        I’ve verified
+                      </button>
+                    </div>
+
+                    {emailUiStatus && (
+                      <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-muted)' }}>
+                        {emailUiStatus}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Support packet */}
+              <div className="profile-footer">
+                <button
+                  type="button"
+                  className="button small"
+                  onClick={async () => {
+                    const packet = {
+                      userId: me?.user?.id || null,
+                      discordId,
+                      discordUsername,
+                      email: email || null,
+                      emailVerifiedAt: (emailVerifiedAtLocal || emailVerifiedAt) || null,
+                      pendingEmail: pendingEmailLocal || pendingEmail || null,
+                    };
+                    const text = JSON.stringify(packet, null, 2);
+                    try {
+                      await navigator.clipboard.writeText(text);
+                    } catch {
+                      window.prompt('Copy support packet:', text);
+                    }
+                  }}
+                >
+                  Copy support packet
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+
 
 function Sidebar({
   spaces,
@@ -1790,7 +2298,7 @@ const highlightedEditorHtml = useMemo(() => {
                       />
                     </pre>
 
-                    <textarea
+                    <textarea wrap="off"
                       ref={editorTextareaRef}
                       className="editor-textarea"
                       value={fileContent}
@@ -2398,6 +2906,8 @@ function DashboardPage() {
   const navigate = useNavigate();
   const location = useLocation();
 
+  useEmailVerifiedGate({ me, loading });
+
   const [activeSlug, setActiveSlug] = useState(null);
   const [usage, setUsage] = useState(null);
   const [spaceDirty, setSpaceDirty] = useState(false);
@@ -2571,45 +3081,60 @@ function DashboardPage() {
     setWorkspaceRequestOkOpen(true);
   }, []);
 
-  const handleRequestWorkspace = async () => {
-    setWorkspaceRequestStatus('');
-    setRequestingWorkspace(true);
+const handleRequestWorkspace = async () => {
+  setWorkspaceRequestStatus('');
+  setRequestingWorkspace(true);
 
-    try {
-      const data = await requestWorkspace(
-        workspaceNote || null,
-        workspaceSlugSuggestion || null
+  try {
+    const data = await requestWorkspace(
+      workspaceNote || null,
+      workspaceSlugSuggestion || null
+    );
+
+    // Success path (backend returns { ok:true, request })
+    if (data?.request) {
+      setPendingRequest(data.request);
+
+      setWorkspaceSlugSuggestion(
+        data.request.suggestedSlug || workspaceSlugSuggestion
       );
+      setWorkspaceNote(data.request.note || workspaceNote);
+    }
 
-      if (data.request) {
-        setPendingRequest(data.request);
-        // keep any admin-friendly context visible if user reopens later
-        setWorkspaceSlugSuggestion(data.request.suggestedSlug || workspaceSlugSuggestion);
-        setWorkspaceNote(data.request.note || workspaceNote);
-      }
+    const msg = 'Request sent. An admin will review it soon.';
+    setWorkspaceRequestStatus(msg);
 
-      // Message rules:
-      // - if alreadyPending: tell them they’re queued
-      // - else: exact success line + OK to continue
-      const msg = data.alreadyPending
-        ? 'You already have a pending request. An admin will review it soon.'
-        : 'Request sent. An admin will review it soon.';
+    // Close the big form modal and show the smaller OK modal
+    setWorkspaceRequestOpen(false);
+    showWorkspaceOk(msg);
+  } catch (err) {
+    console.error(err);
 
+    // Backend “already pending” behavior is a 429 with payload.error === 'too_many_pending_requests'
+    if (err.status === 429 && err.payload?.error === 'too_many_pending_requests') {
+      const pending = Array.isArray(err.payload?.pending) ? err.payload.pending : [];
+      const first = pending[0] || null;
+
+      if (first) setPendingRequest(first);
+
+      const msg = 'You already have a pending request. An admin will review it soon.';
       setWorkspaceRequestStatus(msg);
 
-      // Close the big form modal and show the smaller OK modal
+      // Close big modal and show OK modal (same UX as success)
       setWorkspaceRequestOpen(false);
       showWorkspaceOk(msg);
-    } catch (err) {
-      console.error(err);
-      // keep the form open on error (so they can fix slug, etc.)
-      setWorkspaceRequestStatus(
-        err.payload?.message || 'Failed to submit workspace request.'
-      );
-    } finally {
-      setRequestingWorkspace(false);
+      return;
     }
-  };
+
+    // Keep the form open on other errors
+    setWorkspaceRequestStatus(
+      err.payload?.message || 'Failed to submit workspace request.'
+    );
+  } finally {
+    setRequestingWorkspace(false);
+  }
+};
+
 
   if (loading) {
     return (

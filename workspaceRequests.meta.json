@@ -1,4 +1,3 @@
-
 [
   {
     "id": "wr_64bf8cb6cd063e81c3d0f6935c6514d6",
@@ -82,5 +81,20 @@
     "updatedAt": "2025-12-18T20:36:29.553Z",
     "approvedAt": "2025-12-18T20:36:29.553Z",
     "spaceSlug": "moofstudios1"
+  },
+  {
+    "id": "wr_7947d791d9a20a530be3363b03fef240",
+    "userId": "u_dae6de6c2a725eb602f4e3b8285775d0",
+    "email": "betaraycooper@protonmail.com",
+    "discordId": "884159984093499473",
+    "discordUsername": "southphilly",
+    "discordGlobalName": null,
+    "status": "approved",
+    "note": null,
+    "suggestedSlug": null,
+    "createdAt": "2025-12-23T20:07:23.663Z",
+    "updatedAt": "2025-12-23T22:48:11.762Z",
+    "approvedAt": "2025-12-23T22:48:11.762Z",
+    "spaceSlug": "betaraycooper"
   }
 ]

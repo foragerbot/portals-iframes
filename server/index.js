@@ -47,11 +47,18 @@ import {
   FILE_VERSIONS_META_PATH,
   HISTORY_DIR_NAME,
   HISTORY_BLOBS_DIR_NAME,
-  APP_ORIGIN,
-  PUBLIC_IFRAME_ORIGIN,
+  DISCORD_REQUIRED_ROLE_IDS,
+  DISCORD_BOT_TOKEN,
+  DISCORD_GUILD_ID,
   APP_HOSTNAME,
   PUBLIC_IFRAME_HOSTNAME,
-  SESSION_MAX_AGE_DAYS
+  SESSION_MAX_AGE_DAYS,
+  DISCORD_CLIENT_ID,
+  DISCORD_CLIENT_SECRET,
+  DISCORD_REDIRECT_URI,
+  DISCORD_SCOPES,
+  EMAIL_VERIFY_TOKENS_META_PATH,
+  EMAIL_VERIFY_TOKEN_TTL_HOURS,
 } from './config.js';
 
 import { readJsonArray, writeJsonArray } from './stores/jsonStore.js';
@@ -87,8 +94,11 @@ const APP_HOST = canonicalHost(APP_URL?.host || '');
 const PUBLIC_HOST = canonicalHost(PUBLIC_URL?.host || '');
 const PUBLIC_ORIGIN = PUBLIC_URL?.origin ? String(PUBLIC_URL.origin).replace(/\/+$/, '') : '';
 
-// Enable isolation only if both are set and actually different
-const HOST_ISOLATION_ENABLED = Boolean(APP_HOST && PUBLIC_HOST && APP_HOST !== PUBLIC_HOST);
+// ✅ Only enforce host isolation in production.
+// In dev, Vite proxy + localhost/127.0.0.1 host normalization will otherwise trip the block.
+const HOST_ISOLATION_ENABLED = Boolean(
+  IS_PROD && APP_HOST && PUBLIC_HOST && APP_HOST !== PUBLIC_HOST
+);
 
 function getEffectiveHost(req) {
   const host = canonicalHost(req.get('host'));
@@ -191,6 +201,8 @@ async function getPortalsMarkdown() {
 }
 
 const app = express();
+// Cookies
+app.use(cookieParser());
 
 function pickModel(requested) {
   if (requested && ALLOWED_GPT_MODELS.includes(requested)) {
@@ -565,6 +577,8 @@ function findLatestVersionForFileAndSha(versionsMeta, spaceSlug, fileId, sha256)
  * - write live file
  * - append version record ("save")
  * - update file record pointer to latest
+ *
+ * ✅ NEW: quota enforcement for BOTH live file and history blobs (preflight)
  */
 async function saveTextFileWithHistory({ space, spaceSlug, relPath, content, userId }) {
   const nowIso = new Date().toISOString();
@@ -615,8 +629,85 @@ async function saveTextFileWithHistory({ space, spaceSlug, relPath, content, use
     if (err.code !== 'ENOENT') throw err;
   }
 
+  const oldBytes = typeof diskText === 'string' ? Buffer.byteLength(diskText, 'utf8') : 0;
+  const newBytes = Buffer.byteLength(newText, 'utf8');
+
   // Determine "current" sha if we have it (meta > disk)
   const effectiveCurrentSha = fileRec.currentSha256 || diskSha;
+
+  // ✅ QUOTA PREFLIGHT (prevents bypass via text saves / history blobs)
+  {
+    const quotaMb = Number.isFinite(Number(space.quotaMb)) ? Number(space.quotaMb) : 100;
+    const quotaBytes = quotaMb * 1024 * 1024;
+
+    let currentBytes = 0;
+    try {
+      currentBytes = await getDirSizeBytes(space.dirPath);
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+      currentBytes = 0;
+    }
+
+    // Delta for the live file write
+    // - if file exists: overwrite => delta = new - old
+    // - if missing: create => delta = new
+    const deltaLive = diskSha ? (newBytes - oldBytes) : newBytes;
+
+    // Which blob SHAs might be written by the pipeline?
+    // Important edge case: baseline SHA can equal new SHA (no double count).
+    const blobCandidates = new Map(); // sha -> bytes
+
+    const unchanged = effectiveCurrentSha && effectiveCurrentSha === newSha;
+
+    if (unchanged) {
+      // Only "adoption baseline" case writes a blob when meta is empty
+      if (!fileRec.currentSha256) {
+        // blob content equals the file content
+        blobCandidates.set(newSha, newBytes);
+      }
+    } else {
+      // Baseline blob (import) only when meta has no sha yet and disk exists
+      if (!fileRec.currentSha256 && diskSha) {
+        blobCandidates.set(diskSha, oldBytes);
+      }
+      // New content blob always
+      blobCandidates.set(newSha, newBytes);
+    }
+
+    // Check which blobs already exist on disk
+    let blobAdds = 0;
+    for (const [sha, bytes] of blobCandidates.entries()) {
+      const blobPath = resolveSpacePath(
+        space,
+        `${HISTORY_DIR_NAME}/${HISTORY_BLOBS_DIR_NAME}/${sha}`
+      );
+
+      const exists = await fs
+        .stat(blobPath)
+        .then((s) => !!s && s.isFile())
+        .catch((err) => {
+          if (err.code === 'ENOENT') return false;
+          throw err;
+        });
+
+      if (!exists) blobAdds += bytes;
+    }
+
+    const projectedBytes = currentBytes + deltaLive + blobAdds;
+
+    if (projectedBytes > quotaBytes) {
+      const currentMb = +(currentBytes / (1024 * 1024)).toFixed(2);
+      const projectedMb = +(projectedBytes / (1024 * 1024)).toFixed(2);
+
+      throw Object.assign(new Error(`Save would exceed quota of ${quotaMb} MB.`), {
+        status: 413,
+        error: 'quota_exceeded',
+        quotaMb,
+        currentMb,
+        projectedMb,
+      });
+    }
+  }
 
   // If nothing changed, we usually don't create a new version
   if (effectiveCurrentSha && effectiveCurrentSha === newSha) {
@@ -942,6 +1033,87 @@ function portalsEmbedHeaders(req, res, next) {
   next();
 }
 
+function base64Url(bytes) {
+  return Buffer.from(bytes).toString('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function makeOauthState() {
+  return base64Url(crypto.randomBytes(24));
+}
+
+function buildDiscordAuthorizeUrl({ state }) {
+  const p = new URLSearchParams();
+  p.set('client_id', DISCORD_CLIENT_ID);
+  p.set('redirect_uri', DISCORD_REDIRECT_URI);
+  p.set('response_type', 'code');
+  p.set('scope', DISCORD_SCOPES || 'identify email');
+  p.set('state', state);
+  // optional: forces the consent screen and avoids “silent weirdness” in dev
+  p.set('prompt', 'consent');
+
+  return `https://discord.com/oauth2/authorize?${p.toString()}`;
+}
+
+
+async function exchangeDiscordCodeForToken(code) {
+  const body = new URLSearchParams();
+  body.set('client_id', DISCORD_CLIENT_ID);
+  body.set('client_secret', DISCORD_CLIENT_SECRET);
+  body.set('grant_type', 'authorization_code');
+  body.set('code', code);
+  body.set('redirect_uri', DISCORD_REDIRECT_URI);
+
+  const r = await fetch('https://discord.com/api/oauth2/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+
+  const data = await r.json().catch(() => null);
+  if (!r.ok) {
+    const msg = data?.error_description || data?.error || 'discord_token_exchange_failed';
+    throw Object.assign(new Error(msg), { status: 400, payload: data });
+  }
+  return data; // { access_token, token_type, expires_in, refresh_token?, scope }
+}
+
+async function fetchDiscordMe(accessToken) {
+  const r = await fetch('https://discord.com/api/users/@me', {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  const data = await r.json().catch(() => null);
+  if (!r.ok) {
+    throw Object.assign(new Error('discord_me_failed'), { status: 400, payload: data });
+  }
+  return data; // {id, username, global_name, avatar, email?, verified? ...}
+}
+
+async function fetchDiscordGuildMember(discordUserId) {
+  if (!DISCORD_BOT_TOKEN || !DISCORD_GUILD_ID) {
+    throw Object.assign(new Error('discord_guild_check_misconfigured'), { status: 503 });
+  }
+
+  const r = await fetch(
+    `https://discord.com/api/v10/guilds/${DISCORD_GUILD_ID}/members/${discordUserId}`,
+    { headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` } }
+  );
+
+  if (r.status === 404) return null;
+  const data = await r.json().catch(() => null);
+  if (!r.ok) {
+    throw Object.assign(new Error('discord_guild_member_fetch_failed'), { status: 400, payload: data });
+  }
+  return data;
+}
+
+function hasRequiredRole(member) {
+  if (!Array.isArray(DISCORD_REQUIRED_ROLE_IDS) || DISCORD_REQUIRED_ROLE_IDS.length === 0) return true;
+  const roles = Array.isArray(member?.roles) ? member.roles : [];
+  return DISCORD_REQUIRED_ROLE_IDS.some((rid) => roles.includes(rid));
+}
+
 async function sendMagicLinkEmail(email, url) {
   // If SendGrid isn't configured, fall back to dev-mode logging
   if (!SENDGRID_API_KEY || !SENDGRID_FROM) {
@@ -1214,6 +1386,106 @@ async function sendWorkspaceApprovalEmailToUser(user, spaceRecord, requestRecord
     console.error('[workspace-email] failed to send approval email', err);
   }
 }
+// ───────────────── Email verification meta ─────────────────
+
+async function loadEmailVerifyTokens() {
+  return readJsonArray(EMAIL_VERIFY_TOKENS_META_PATH);
+}
+
+async function saveEmailVerifyTokens(arr) {
+  return writeJsonArray(EMAIL_VERIFY_TOKENS_META_PATH, arr);
+}
+
+function requireVerifiedEmail(req, res, next) {
+  const email = String(req.user?.email || '').trim().toLowerCase();
+  const verifiedAt = req.user?.emailVerifiedAt || null;
+
+  if (!email || !isValidEmail(email) || !verifiedAt) {
+    return res.status(403).json({
+      error: 'email_not_verified',
+      message: 'Please verify your email before continuing.',
+    });
+  }
+  next();
+}
+
+function buildAppUrl(pathname = '/') {
+  const base = String(APP_BASE_URL || '').replace(/\/+$/, '');
+  return base + (pathname.startsWith('/') ? pathname : `/${pathname}`);
+}
+
+function buildVerifyEmailUrl(tokenId) {
+  // This link should point to your API (in dev it’s localhost:5173 via proxy, which is fine)
+  // Use APP_BASE_URL origin since that’s the browser-visible origin in your setup.
+  const base = String(APP_BASE_URL || '').replace(/\/+$/, '');
+  return `${base}/api/auth/email/verify?token=${encodeURIComponent(tokenId)}`;
+}
+
+async function sendVerifyEmailToUser({ toEmail, verifyUrl, isWelcome }) {
+  if (!SENDGRID_API_KEY || !SENDGRID_FROM) {
+    console.log('[email-verify] dev mode: would send verify email to', toEmail, verifyUrl);
+    return;
+  }
+
+  const subject = isWelcome
+    ? 'Welcome to Portals iFrame Builder — verify your email'
+    : 'Verify your email for Portals iFrame Builder';
+
+  const html = `
+  <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:#020617; color:#e5e7eb; padding:24px;">
+    <table width="100%" cellspacing="0" cellpadding="0" style="max-width:560px; margin:0 auto; background:#0b1120; border-radius:14px; border:1px solid #1f2937;">
+      <tr>
+        <td style="padding:18px 20px 12px; border-bottom:1px solid #1f2937;">
+          <div style="font-size:11px; letter-spacing:0.18em; text-transform:uppercase; color:#22d3ee; margin-bottom:4px;">
+            Portals iFrame Builder
+          </div>
+          <div style="font-size:16px; font-weight:600; color:#e5e7eb;">
+            ${isWelcome ? 'Welcome — verify your email' : 'Verify your email'}
+          </div>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:18px 20px 10px; font-size:13px; color:#cbd5f5;">
+          <p style="margin:0 0 10px;">
+            Click the button below to verify this email address so we can send workspace approvals and updates.
+          </p>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:0 20px 18px;">
+          <table cellspacing="0" cellpadding="0" style="margin:0 auto;">
+            <tr>
+              <td align="center" style="border-radius:999px; background:linear-gradient(to right,#22d3ee,#a855f7);">
+                <a href="${verifyUrl}" style="display:inline-block; padding:10px 24px; font-size:13px; color:#020617; text-decoration:none; font-weight:600;">
+                  Verify email
+                </a>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:0 20px 18px;">
+          <p style="margin:0 0 8px; font-size:12px; color:#9ca3af;">
+            If the button doesn’t work, copy/paste:
+          </p>
+          <p style="margin:0; font-size:11px; color:#22d3ee; word-break:break-all;">
+            <a href="${verifyUrl}" style="color:#22d3ee; text-decoration:none;">${verifyUrl}</a>
+          </p>
+        </td>
+      </tr>
+    </table>
+  </div>`;
+
+  const text = [
+    'Verify your email for Portals iFrame Builder',
+    '',
+    `Verify: ${verifyUrl}`,
+  ].join('\n');
+
+  await sgMail.send({ to: toEmail, from: SENDGRID_FROM, subject, text, html });
+  console.log('[email-verify] sent verify email to', toEmail);
+}
 
 //history helpers
 function isValidSha256Hex(s) {
@@ -1266,11 +1538,195 @@ async function readHistoryBlobText(space, sha256) {
   return text;
 }
 
+/** DISCORD OAUTH LOGIN */
+// ───────────────── Discord OAuth ─────────────────
+
+app.get('/api/auth/discord/start', (req, res) => {
+  if (!DISCORD_CLIENT_ID || !DISCORD_CLIENT_SECRET || !DISCORD_REDIRECT_URI) {
+    return res.status(503).json({ error: 'discord_auth_disabled' });
+  }
+
+  // ✅ if an oauth_state already exists, don't generate a new one
+  const existing = String(req.cookies?.oauth_state || '').trim();
+  if (existing) {
+    return res.redirect(302, buildDiscordAuthorizeUrl({ state: existing }));
+  }
+
+  const state = makeOauthState();
+  res.cookie('oauth_state', state, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: IS_PROD,
+    maxAge: 1000 * 60 * 10,
+  });
+
+  res.setHeader('Cache-Control', 'no-store');
+  return res.redirect(302, buildDiscordAuthorizeUrl({ state }));
+});
+
+// /api/auth/discord/callback
+app.get('/api/auth/discord/callback', async (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const code = String(req.query?.code || '');
+    const state = String(req.query?.state || '');
+    const expected = String(req.cookies?.oauth_state || '');
+
+    // Clear state cookie regardless
+    res.clearCookie('oauth_state', {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: IS_PROD,
+    });
+
+    if (!DISCORD_CLIENT_ID || !DISCORD_CLIENT_SECRET || !DISCORD_REDIRECT_URI) {
+      return res.status(503).json({ error: 'discord_auth_disabled' });
+    }
+
+    if (!code) return res.status(400).json({ error: 'missing_code' });
+    if (!state || !expected || state !== expected) {
+      return res.status(400).json({ error: 'bad_state' });
+    }
+
+    // Exchange code -> access token, then fetch /users/@me
+    const token = await exchangeDiscordCodeForToken(code);
+    const me = await fetchDiscordMe(token.access_token);
+
+    const discordId = String(me.id || '');
+    if (!discordId) return res.status(400).json({ error: 'discord_no_id' });
+
+    // ✅ REQUIRED: guild membership + required role gate
+    const member = await fetchDiscordGuildMember(discordId);
+    if (!member) return res.status(403).json({ error: 'not_in_guild' });
+    if (!hasRequiredRole(member)) return res.status(403).json({ error: 'missing_required_role' });
+
+    // ✅ Discord-provided email (we use it as the default "unverified" email)
+    const discordEmail = String(me.email || '').trim().toLowerCase();
+    const discordEmailOk = !!discordEmail && isValidEmail(discordEmail);
+
+    // Guarantee: user docs never have email=null
+    // If Discord didn't provide email, we can't satisfy the invariant.
+    if (!discordEmailOk) {
+      const appBase = String(APP_BASE_URL || '').replace(/\/+$/, '');
+      if (appBase) {
+        return res.redirect(302, `${appBase}/login?error=discord_email_missing`);
+      }
+      return res.status(403).json({
+        error: 'discord_email_missing',
+        message: 'Discord did not provide an email address. Enable the email scope and try again.',
+      });
+    }
+
+    // Build a stable avatar URL for UI
+    const avatarHash = me.avatar ? String(me.avatar) : '';
+    const isAnimated = avatarHash.startsWith('a_');
+    const avatarExt = isAnimated ? 'gif' : 'png';
+    const discordAvatarUrl = avatarHash
+      ? `https://cdn.discordapp.com/avatars/${encodeURIComponent(discordId)}/${encodeURIComponent(avatarHash)}.${avatarExt}?size=128`
+      : null;
+
+    const users = await loadUsersMeta();
+    let user = users.find((u) => u && String(u.discordId || '') === discordId) || null;
+
+    const nowIso = new Date().toISOString();
+
+    if (!user) {
+      user = {
+        id: generateId('u_'),
+        roles: ['user'],
+        createdAt: nowIso,
+
+        // ✅ Always set a default email immediately (UNVERIFIED in our system)
+        email: discordEmail,
+        emailVerifiedAt: null,
+
+        pendingEmail: null,
+        pendingEmailSetAt: null,
+      };
+      users.push(user);
+    }
+
+    // Update Discord profile fields
+    user.discordId = discordId;
+    user.discordUsername = me.username || null;
+    user.discordGlobalName = me.global_name || null;
+    user.discordAvatar = avatarHash || null;
+    user.discordAvatarUrl = discordAvatarUrl;
+    user.lastLoginAt = nowIso;
+
+    // Role snapshot
+    user.discordGuildId = DISCORD_GUILD_ID || null;
+    user.discordRoleIds = Array.isArray(member.roles) ? member.roles : [];
+
+    // Billing/defaults
+    user.billing = user.billing || {};
+    user.status = user.status || 'active';
+    user.updatedAt = nowIso;
+
+    // ✅ Invariant: user.email must always exist.
+    // - If they have a VERIFIED email already, keep it (do not overwrite).
+    // - If NOT verified, ensure user.email is set (defaults to Discord email).
+    const currentEmail = String(user.email || '').trim().toLowerCase();
+    const hasVerifiedEmail =
+      !!user.emailVerifiedAt && isValidEmail(currentEmail);
+
+    if (!hasVerifiedEmail) {
+      if (!currentEmail || !isValidEmail(currentEmail)) {
+        user.email = discordEmail;
+      }
+      // keep unverified until they click verify link
+      user.emailVerifiedAt = null;
+    }
+
+    await saveUsersMeta(users);
+
+    // Create session + set sid cookie
+    const sessions = await loadSessionsMeta();
+    const sid = generateId('sid_');
+
+    sessions.push({
+      id: sid,
+      userId: user.id,
+      email: String(user.email || '').trim().toLowerCase() || null,
+      createdAt: nowIso,
+      userAgent: req.get('user-agent') || null,
+      ip: req.ip || null,
+    });
+    await saveSessionsMeta(sessions);
+
+    res.cookie('sid', sid, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: IS_PROD,
+      maxAge: 1000 * 60 * 60 * 24 * 30,
+    });
+
+    // Redirect into email-verify gate UI
+    const appBase = String(APP_BASE_URL || '').replace(/\/+$/, '');
+    if (!appBase) {
+      return res.status(500).json({ error: 'misconfigured', message: 'APP_BASE_URL is not set' });
+    }
+
+    // If already verified, go straight in.
+    if (hasVerifiedEmail) {
+      return res.redirect(302, `${appBase}/`);
+    }
+
+    // Otherwise, go to the verify screen (your LoginPage shows this)
+    return res.redirect(302, `${appBase}/login?step=verify`);
+  } catch (err) {
+    next(err);
+  }
+});
+
+
 /**
  * Restore a historical version into a live file path.
  * - Keeps the same fileId (even if the file was deleted)
  * - Overwrites ONLY if restoring into the same file record’s currentPath
  * - Creates a new version record with action: "restore"
+ *
+ * ✅ NEW: quota enforcement for the live file write
  */
 async function restoreFileVersionToLive({ space, spaceSlug, versionId, toPath, userId }) {
   const nowIso = new Date().toISOString();
@@ -1288,6 +1744,7 @@ async function restoreFileVersionToLive({ space, spaceSlug, versionId, toPath, u
 
   // Read content from blob (source of truth)
   const content = await readHistoryBlobText(space, sha);
+  const restoredBytes = Buffer.byteLength(String(content || ''), 'utf8');
 
   // Find or create file record by fileId (KEEP SAME FILEID)
   let fileRec = findFileRecordByIdAnyStatus(filesMeta, spaceSlug, ver.fileId);
@@ -1331,19 +1788,52 @@ async function restoreFileVersionToLive({ space, spaceSlug, versionId, toPath, u
   // Disk overwrite rules:
   // - If the live file exists AND it’s the same file record’s currentPath (and not deleted), allow overwrite.
   // - Otherwise, block overwrite.
-  const diskExists = await fs
+  const destStat = await fs
     .stat(destFullPath)
-    .then((s) => !!s && s.isFile())
+    .then((s) => (s && s.isFile() ? s : null))
     .catch((err) => {
-      if (err.code === 'ENOENT') return false;
+      if (err.code === 'ENOENT') return null;
       throw err;
     });
 
+  const diskExists = !!destStat;
   const isOverwritingSameLiveFile =
     diskExists && fileRec.deletedAt == null && fileRec.currentPath === destRel;
 
   if (diskExists && !isOverwritingSameLiveFile) {
     throw Object.assign(new Error('target_exists'), { status: 409 });
+  }
+
+  // ✅ QUOTA PREFLIGHT (restore only affects live file size; blob already exists)
+  {
+    const quotaMb = Number.isFinite(Number(space.quotaMb)) ? Number(space.quotaMb) : 100;
+    const quotaBytes = quotaMb * 1024 * 1024;
+
+    let currentBytes = 0;
+    try {
+      currentBytes = await getDirSizeBytes(space.dirPath);
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+      currentBytes = 0;
+    }
+
+    const oldBytes = destStat ? Number(destStat.size || 0) : 0;
+    const deltaLive = diskExists ? (restoredBytes - oldBytes) : restoredBytes;
+
+    const projectedBytes = currentBytes + deltaLive;
+
+    if (projectedBytes > quotaBytes) {
+      const currentMb = +(currentBytes / (1024 * 1024)).toFixed(2);
+      const projectedMb = +(projectedBytes / (1024 * 1024)).toFixed(2);
+
+      throw Object.assign(new Error(`Restore would exceed quota of ${quotaMb} MB.`), {
+        status: 413,
+        error: 'quota_exceeded',
+        quotaMb,
+        currentMb,
+        projectedMb,
+      });
+    }
   }
 
   // Ensure blob exists (safe no-op if already there)
@@ -1435,19 +1925,33 @@ async function sessionMiddleware(req, res, next) {
       await revoke('user_missing');
       return next();
     }
+// ✅ Allow sessions for Discord-authenticated users during onboarding,
+// even if they haven't verified an email yet.
+// We'll gate sensitive actions with requireVerifiedEmail instead.
+const email = String(user.email || '').trim().toLowerCase();
+const pendingEmail = String(user.pendingEmail || '').trim().toLowerCase();
 
-    // ✅ Enforce allowlist + status on every request (revocation works immediately)
-    const approved = await isEmailApproved(user.email);
-    const status = String(user.status || 'active').toLowerCase();
+// If they have *some* email value (current or pending), it must be valid.
+// But it's OK for user.email to be empty during onboarding.
+if (email && !isValidEmail(email)) {
+  await revoke('bad_email');
+  return next();
+}
+if (pendingEmail && !isValidEmail(pendingEmail)) {
+  await revoke('bad_pending_email');
+  return next();
+}
 
-    if (!approved) {
-      await revoke('not_allowlisted');
-      return next();
-    }
-    if (status !== 'active') {
-      await revoke('inactive_user');
-      return next();
-    }
+// Optional: if you want to require Discord identity to keep a session when email is missing:
+const hasDiscord = !!String(user.discordId || '').trim();
+if (!hasDiscord && !email) {
+  await revoke('missing_identity');
+  return next();
+}
+
+const status = String(user.status || 'active').toLowerCase();
+if (status !== 'active') { await revoke('inactive_user'); return next(); }
+
 
     req.session = session;
     req.user = user;
@@ -1509,9 +2013,6 @@ if (TRUST_PROXY) {
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: false }));
 
-// Cookies
-app.use(cookieParser());
-
 // Sessions (loads req.user if sid cookie present)
 app.use(sessionMiddleware);
 
@@ -1552,41 +2053,49 @@ if (IS_PROD && APP_HOSTNAME && PUBLIC_IFRAME_HOSTNAME && APP_HOSTNAME !== PUBLIC
 }
 
 // ───────────────── Origin allowlists ─────────────────
-// Only the editor UI origin should be allowed to make credentialed API calls.
-// DO NOT include the public iframe origin here.
+// ───────────────── CORS (API only) ─────────────────
 
-const DEV_ORIGINS = IS_PROD
-  ? []
-  : [
-      'http://localhost:4100',
-      'http://localhost:5173',
-    ];
-
+// Origins allowed to perform *write* actions (enforced separately by requireEditorOrigin)
 const EDITOR_ORIGINS = new Set([
-  ...(APP_ORIGIN ? [APP_ORIGIN] : []),
-  ...DEV_ORIGINS,
+  'https://iframes.jawn.bot',
+  'http://localhost:4100',
+  'http://localhost:5173',
+  'http://127.0.0.1:4100',
+  'http://127.0.0.1:5173',
 ]);
 
-const ALLOWED_ORIGINS = Array.from(EDITOR_ORIGINS);
+// Origins allowed to call the API in PROD
+const PROD_API_ORIGINS = new Set([
+  'https://iframes.jawn.bot',
+]);
 
-app.use(
-  '/api',
-  enforceApiOnAppHost,
-  cors({
-    origin(origin, cb) {
-      // Allow non-browser / same-origin calls (curl, health checks, etc.)
-      if (!origin) return cb(null, true);
+function apiCorsOrigin(origin, cb) {
+  // Allow non-browser / curl / health checks (no Origin header)
+  if (!origin) return cb(null, true);
 
-      if (ALLOWED_ORIGINS.includes(origin)) {
-        return cb(null, true);
-      }
+  // DEV: be permissive so Vite<->API split ports always works
+  if (NODE_ENV !== 'production') return cb(null, true);
 
-      console.warn('[cors] blocked origin:', origin);
-      return cb(new Error('Not allowed by CORS'));
-    },
-    credentials: true,
-  })
-);
+  // PROD: strict allowlist
+  if (PROD_API_ORIGINS.has(origin)) return cb(null, true);
+
+  console.warn('[cors] blocked origin:', origin);
+  return cb(null, false);
+}
+
+const apiCors = cors({
+  origin: apiCorsOrigin,
+  credentials: true,
+  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'x-admin-token', 'Authorization'],
+  maxAge: 86400,
+});
+
+// Apply to all /api routes
+app.use('/api', enforceApiOnAppHost, apiCors);
+
+// ✅ Express 5-safe preflight handler (no path-to-regexp parsing)
+app.options(/^\/api\/.*$/, apiCors);
 
 
 // ───────────────── Logs ─────────────────
@@ -1626,55 +2135,6 @@ app.get('/api/version', (req, res) => {
   });
 });
 
-// ───────────────── Magic-link auth ─────────────────
-
-// Start magic link: POST /api/auth/magic/start { email }
-app.post('/api/auth/magic/start', magicLinkRateLimiter, async (req, res, next) => {
-  try {
-    const { email } = req.body || {};
-    const normalizedEmail = (email || '').trim().toLowerCase();
-
-    if (!isValidEmail(normalizedEmail)) {
-      return res
-        .status(400)
-        .json({ error: 'bad_email', message: 'Invalid email address' });
-    }
-
-    // Invite-only gate: only approved emails can receive magic links
-    const approved = await isEmailApproved(normalizedEmail);
-    if (!approved) {
-      return res.status(403).json({
-        error: 'not_approved',
-        message: 'This project is invite-only. Your email is not approved for access.',
-      });
-    }
-
-    const tokens = await loadTokensMeta();
-    const token = generateId('mt_');
-    const now = new Date();
-    const expiresAt = new Date(now.getTime() + 15 * 60 * 1000); // 15 min
-
-    tokens.push({
-      id: token,
-      email: normalizedEmail,
-      createdAt: now.toISOString(),
-      expiresAt: expiresAt.toISOString(),
-      usedAt: null,
-    });
-    await saveTokensMeta(tokens);
-
-    // ✅ NEW: Put the token in the URL hash so it never hits server logs or Referer headers
-    const appBase = APP_BASE_URL.replace(/\/+$/, '');
-    const loginUrl = `${appBase}/login#token=${encodeURIComponent(token)}`;
-
-    await sendMagicLinkEmail(normalizedEmail, loginUrl);
-
-    console.log(`[auth] magic link created for ${normalizedEmail}`);
-    res.json({ ok: true });
-  } catch (err) {
-    next(err);
-  }
-});
 
 // In-process lock queue (single Node process)
 // Prevents races like "same token consumed twice" under concurrent requests.
@@ -1773,46 +2233,12 @@ async function consumeMagicTokenAndSetSessionCookie({ token, req, res }) {
   return { ok: true, user };
 }
 
-// ✅ NEW: Verify magic token via POST body (token never appears in URL)
-app.post('/api/auth/magic/verify', async (req, res, next) => {
-  res.setHeader('Cache-Control', 'no-store');
-  try {
-    const { token } = req.body || {};
-
-    const result = await consumeMagicTokenAndSetSessionCookie({ token, req, res });
-    if (!result.ok) return res.status(result.status).json(result.payload);
-
-    // Keep response minimal; cookie is the real session
-    res.json({ ok: true, user: { id: result.user.id, email: result.user.email } });
-  } catch (err) {
-    next(err);
-  }
+app.all(/^\/api\/auth\/magic(\/.*)?$/, (req, res) => {
+  return res.status(410).json({
+    error: 'magic_link_disabled',
+    message: 'Magic link login has been retired. Please sign in with Discord.',
+  });
 });
-
-// Legacy support: GET /api/auth/magic/verify?token=...&redirect=1
-// ✅ No longer consumes token here. It just bounces into /login#token=... so the token leaves query-string land.
-app.post('/api/auth/magic/verify', async (req, res, next) => {
-  res.setHeader('Cache-Control', 'no-store');
-  try {
-    const { token } = req.body || {};
-
-    if (!token || typeof token !== 'string') {
-      return res.status(400).json({ error: 'bad_token', message: 'Invalid token' });
-    }
-
-    // ✅ lock per-token so it can’t be consumed twice concurrently
-    const result = await withInProcessLock(`magic:${token}`, async () => {
-      return consumeMagicTokenAndSetSessionCookie({ token, req, res });
-    });
-
-    if (!result.ok) return res.status(result.status).json(result.payload);
-
-    res.json({ ok: true, user: { id: result.user.id, email: result.user.email } });
-  } catch (err) {
-    next(err);
-  }
-});
-
 
 // Logout: POST /api/auth/logout
 app.post('/api/auth/logout', async (req, res, next) => {
@@ -1852,25 +2278,203 @@ app.get('/api/me', async (req, res, next) => {
     }
 
     const spaces = await loadSpacesMeta();
+    const normalizedEmail = String(req.user.email || '').trim().toLowerCase();
 
-const normalizedEmail = (req.user.email || '').trim().toLowerCase();
+    const mySpaces = spaces.filter((s) => {
+      if (!s || s.status !== 'active') return false;
+      if (s.ownerUserId && s.ownerUserId === req.user.id) return true;
+      if (normalizedEmail && s.ownerEmail && String(s.ownerEmail).trim().toLowerCase() === normalizedEmail) return true;
+      return false;
+    });
 
-const mySpaces = spaces.filter((s) => {
-  if (s.status !== 'active') return false;
-  if (s.ownerUserId && s.ownerUserId === req.user.id) return true;
-  if (s.ownerEmail && s.ownerEmail.trim().toLowerCase() === normalizedEmail) return true;
-  return false;
-});
-
-    res.json({
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({
       ok: true,
       user: {
         id: req.user.id,
-        email: req.user.email,
+
+        // email + verification gate
+        email: req.user.email || null,
+        pendingEmail: req.user.pendingEmail || null,
+        emailVerifiedAt: req.user.emailVerifiedAt || null,
+
+        // discord identity for header pill
+        discordId: req.user.discordId || null,
+        discordUsername: req.user.discordUsername || null,
+        discordGlobalName: req.user.discordGlobalName || null,
+        discordAvatar: req.user.discordAvatar || null,
+        discordAvatarUrl: req.user.discordAvatarUrl || null,
+
         roles: req.user.roles || [],
+        status: req.user.status || 'active',
+        lastLoginAt: req.user.lastLoginAt || null,
       },
       spaces: mySpaces,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+
+// POST /api/user/email/start
+// body: { email }
+app.post('/api/user/email/start', requireUser, requireEditorOrigin, async (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const emailRaw = String(req.body?.email || '').trim().toLowerCase();
+    if (!emailRaw || !isValidEmail(emailRaw)) {
+      return res.status(400).json({ error: 'bad_email', message: 'Provide a valid email.' });
+    }
+
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const expiresAt = new Date(now.getTime() + EMAIL_VERIFY_TOKEN_TTL_HOURS * 60 * 60 * 1000).toISOString();
+
+    const users = await loadUsersMeta();
+    const idx = users.findIndex((u) => u && u.id === req.user.id);
+    if (idx === -1) return res.status(404).json({ error: 'user_not_found' });
+
+    // If they already verified this exact email, no-op.
+    const currentEmail = String(users[idx].email || '').trim().toLowerCase();
+    const alreadyVerified = !!users[idx].emailVerifiedAt && currentEmail === emailRaw;
+    if (alreadyVerified) {
+      return res.json({ ok: true, alreadyVerified: true });
+    }
+
+    // Set pending email (or if no email yet, still treat as pending until verified)
+    users[idx] = {
+      ...users[idx],
+      pendingEmail: emailRaw,
+      pendingEmailSetAt: nowIso,
+      emailVerifySentAt: nowIso,
+      updatedAt: nowIso,
+    };
+
+    // Revoke any old unused tokens for this user (keeps store clean)
+    const tokens = await loadEmailVerifyTokens();
+    for (const t of tokens) {
+      if (t && t.userId === req.user.id && !t.usedAt && !t.revokedAt) {
+        t.revokedAt = nowIso;
+      }
+    }
+
+    const tokenId = generateId('ev_');
+    tokens.push({
+      id: tokenId,
+      userId: req.user.id,
+      email: emailRaw,
+      createdAt: nowIso,
+      expiresAt,
+      usedAt: null,
+      revokedAt: null,
+    });
+
+    await Promise.all([saveUsersMeta(users), saveEmailVerifyTokens(tokens)]);
+
+    const isWelcome = !users[idx].welcomeEmailSentAt;
+    const verifyUrl = buildVerifyEmailUrl(tokenId);
+
+    await sendVerifyEmailToUser({ toEmail: emailRaw, verifyUrl, isWelcome });
+
+    // Mark welcome sent the first time we ever send this “welcome/verify” email
+    if (isWelcome) {
+      const users2 = await loadUsersMeta();
+      const idx2 = users2.findIndex((u) => u && u.id === req.user.id);
+      if (idx2 !== -1 && !users2[idx2].welcomeEmailSentAt) {
+        users2[idx2] = { ...users2[idx2], welcomeEmailSentAt: nowIso, updatedAt: nowIso };
+        await saveUsersMeta(users2);
+      }
+    }
+
+    return res.json({ ok: true, email: emailRaw, sent: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/auth/email/verify?token=ev_...
+app.get('/api/auth/email/verify', async (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const tokenId = String(req.query?.token || '').trim();
+    if (!tokenId || !tokenId.startsWith('ev_')) {
+      return res.status(400).send('Bad token');
+    }
+
+    const tokens = await loadEmailVerifyTokens();
+    const t = tokens.find((x) => x && x.id === tokenId) || null;
+    if (!t || t.usedAt || t.revokedAt) {
+      return res.status(400).send('Token invalid or already used.');
+    }
+
+    const now = new Date();
+    if (Date.parse(t.expiresAt) < now.getTime()) {
+      return res.status(400).send('Token expired.');
+    }
+
+    const users = await loadUsersMeta();
+    const idx = users.findIndex((u) => u && u.id === t.userId);
+    if (idx === -1) {
+      return res.status(400).send('User not found.');
+    }
+
+    const nowIso = now.toISOString();
+
+    // Promote pending email to verified email
+    users[idx] = {
+      ...users[idx],
+      email: t.email,
+      emailVerifiedAt: nowIso,
+      pendingEmail: null,
+      pendingEmailSetAt: null,
+      updatedAt: nowIso,
+    };
+
+    // Mark token as used
+    const tidx = tokens.findIndex((x) => x && x.id === tokenId);
+    tokens[tidx] = { ...tokens[tidx], usedAt: nowIso };
+
+    await Promise.all([saveUsersMeta(users), saveEmailVerifyTokens(tokens)]);
+
+    // Redirect back to app (you can style a “verified!” toast on this query param)
+    return res.redirect(302, buildAppUrl('/login?verified=1'));
+  } catch (err) {
+    next(err);
+  }
+});
+// POST /api/user/email/resend
+app.post('/api/user/email/resend', requireUser, requireEditorOrigin, async (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const email = String(req.user?.pendingEmail || req.user?.email || '').trim().toLowerCase();
+    if (!email || !isValidEmail(email)) {
+      return res.status(400).json({ error: 'missing_email', message: 'No email on file to verify.' });
+    }
+
+    // If already verified, no-op
+    if (req.user?.emailVerifiedAt && String(req.user.email || '').trim().toLowerCase() === email) {
+      return res.json({ ok: true, alreadyVerified: true });
+    }
+
+    // Reuse /start logic by creating a fresh token + sending “verify” (not welcome)
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const expiresAt = new Date(now.getTime() + EMAIL_VERIFY_TOKEN_TTL_HOURS * 60 * 60 * 1000).toISOString();
+
+    const tokens = await loadEmailVerifyTokens();
+    for (const t of tokens) {
+      if (t && t.userId === req.user.id && !t.usedAt && !t.revokedAt) t.revokedAt = nowIso;
+    }
+
+    const tokenId = generateId('ev_');
+    tokens.push({ id: tokenId, userId: req.user.id, email, createdAt: nowIso, expiresAt, usedAt: null, revokedAt: null });
+    await saveEmailVerifyTokens(tokens);
+
+    const verifyUrl = buildVerifyEmailUrl(tokenId);
+    await sendVerifyEmailToUser({ toEmail: email, verifyUrl, isWelcome: false });
+
+    return res.json({ ok: true, sent: true });
   } catch (err) {
     next(err);
   }
@@ -2042,6 +2646,15 @@ app.post('/api/spaces/:slug/file/restore', requireUser, requireEditorOrigin, asy
     res.setHeader('Cache-Control', 'no-store');
     res.json(result);
   } catch (err) {
+    if (err && err.status === 413 && err.error === 'quota_exceeded') {
+      return res.status(413).json({
+        error: 'quota_exceeded',
+        message: err.message || 'Restore would exceed quota.',
+        quotaMb: err.quotaMb,
+        currentMb: err.currentMb,
+        projectedMb: err.projectedMb,
+      });
+    }
     if (err.message === 'version_not_found') return res.status(404).json({ error: 'version_not_found' });
     if (err.message === 'blob_missing') return res.status(404).json({ error: 'blob_missing' });
     if (err.message === 'target_exists') return res.status(409).json({ error: 'target_exists' });
@@ -2195,9 +2808,19 @@ app.post('/api/spaces/:slug/file', requireUser, requireEditorOrigin, async (req,
       changed: result.changed,
     });
   } catch (err) {
+    if (err && err.status === 413 && err.error === 'quota_exceeded') {
+      return res.status(413).json({
+        error: 'quota_exceeded',
+        message: err.message || 'Save would exceed quota.',
+        quotaMb: err.quotaMb,
+        currentMb: err.currentMb,
+        projectedMb: err.projectedMb,
+      });
+    }
     next(err);
   }
 });
+
 
 // Delete a file in a space
 // DELETE /api/spaces/:slug/file
@@ -2947,32 +3570,44 @@ app.get('/api/spaces/:slug/usage', requireUser, async (req, res, next) => {
     next(err);
   }
 });
-
 // User-facing: request a new workspace / space
 // POST /api/spaces/request
-// body: { note?: string }
-app.post('/api/spaces/request', requireUser, requireEditorOrigin, async (req, res, next) => {
+// body: { note?: string, suggestedSlug?: string, email?: string }
+app.post('/api/spaces/request', requireUser, requireEditorOrigin, requireVerifiedEmail, async (req, res, next) => {
   try {
     const note = (req.body?.note || '').toString().trim();
     const suggestedSlugRaw = (req.body?.suggestedSlug || '').toString().trim();
+    const emailFromBody = (req.body?.email || '').toString().trim().toLowerCase();
+
+    // ✅ Enforce that we have an email on first request (for approvals/comms)
+    // - Prefer stored user email
+    // - Allow frontend to supply email once (stored to user record)
+    const existingEmail = String(req.user?.email || '').trim().toLowerCase();
+    const effectiveEmail = existingEmail || emailFromBody;
+
+    if (!effectiveEmail || !isValidEmail(effectiveEmail)) {
+      return res.status(400).json({
+        error: 'missing_email',
+        message: 'Email is required to request a workspace. Please provide a valid email address.',
+      });
+    }
+
     const now = new Date();
+    const nowIso = now.toISOString();
 
     const requests = await loadWorkspaceRequests();
+    const pending = requests.filter((r) => r.userId === req.user.id && r.status === 'pending');
 
-const pending = requests.filter(
-  (r) => r.userId === req.user.id && r.status === 'pending'
-);
+    if (pending.length >= MAX_PENDING_WORKSPACE_REQUESTS) {
+      return res.status(429).json({
+        ok: false,
+        error: 'too_many_pending_requests',
+        message: `You already have ${pending.length} pending request(s).`,
+        pending,
+      });
+    }
 
-if (pending.length >= MAX_PENDING_WORKSPACE_REQUESTS) {
-  return res.status(429).json({
-    ok: false,
-    error: 'too_many_pending_requests',
-    message: `You already have ${pending.length} pending request(s).`,
-    pending,
-  });
-}
-
-       let suggestedSlug = null;
+    let suggestedSlug = null;
     if (suggestedSlugRaw) {
       let normalized = suggestedSlugRaw.trim().toLowerCase();
       normalized = normalized.replace(/[^a-z0-9-]/g, '-');
@@ -2981,22 +3616,43 @@ if (pending.length >= MAX_PENDING_WORKSPACE_REQUESTS) {
       if (!normalized || !/^[a-z0-9-]{3,32}$/.test(normalized)) {
         return res.status(400).json({
           error: 'bad_suggested_slug',
-          message: 'Slug must be between 3 and 32 characters in length.'
+          message: 'Slug must be between 3 and 32 characters in length.',
         });
       }
       suggestedSlug = normalized;
     }
 
+    // ✅ If user record is missing email, persist it now (first-time capture)
+    if (!existingEmail) {
+      const users = await loadUsersMeta();
+      const idx = users.findIndex((u) => u && u.id === req.user.id);
+      if (idx !== -1) {
+        users[idx] = {
+          ...users[idx],
+          email: effectiveEmail,
+          updatedAt: nowIso,
+        };
+        await saveUsersMeta(users);
+        // keep req.user in sync for this request
+        req.user.email = effectiveEmail;
+      }
+    }
 
     const reqRecord = {
       id: generateId('wr_'),
       userId: req.user.id,
-      email: req.user.email,
+      email: effectiveEmail,
+
+      // ✅ Helpful Discord identity for admin review (even though email is required)
+      discordId: req.user.discordId || null,
+      discordUsername: req.user.discordUsername || null,
+      discordGlobalName: req.user.discordGlobalName || null,
+
       status: 'pending', // 'pending' | 'approved' | 'rejected'
       note: note || null,
       suggestedSlug,
-      createdAt: now.toISOString(),
-      updatedAt: now.toISOString()
+      createdAt: nowIso,
+      updatedAt: nowIso,
     };
 
     requests.push(reqRecord);
@@ -3006,37 +3662,23 @@ if (pending.length >= MAX_PENDING_WORKSPACE_REQUESTS) {
       id: reqRecord.id,
       userId: reqRecord.userId,
       email: reqRecord.email,
-      suggestedSlug
+      discordId: reqRecord.discordId,
+      suggestedSlug,
     });
-     try {
+
+    try {
       await sendWorkspaceRequestNotificationToAdmin(reqRecord);
-    } catch (mailErr) {
+    } catch {
       // already logged inside helper; no-op here
     }
 
-    res.status(201).json({
-      ok: true,
-      request: reqRecord
-    });
+    return res.status(201).json({ ok: true, request: reqRecord });
   } catch (err) {
     console.error('[workspace-requests] error creating request', err);
     next(err);
   }
 });
 
-
-// ───────────────── Admin routes (manual provisioning) ─────────────────
-
-// List spaces metadata (admin only)
-app.get('/api/admin/spaces', requireAdmin, async (req, res, next) => {
-  try {
-    await ensureSpacesRoot();
-    const spaces = await loadSpacesMeta();
-    res.json({ spaces });
-  } catch (err) {
-    next(err);
-  }
-});
 
 // Create a new space: POST /api/admin/spaces
 // Body: { slug, quotaMb?, ownerEmail? }
@@ -3050,32 +3692,38 @@ app.post('/api/admin/spaces', requireAdmin, async (req, res, next) => {
       console.log('[admin] invalid slug:', slug);
       return res.status(400).json({
         error: 'bad_slug',
-        message:
-          'Slug must be 3-32 chars of lowercase letters, digits, or hyphens.',
+        message: 'Slug must be 3-32 chars of lowercase letters, digits, or hyphens.',
       });
     }
 
-let normalizedOwnerEmail = null;
-let ownerUserId = null;
+    // ✅ Email stays optional for admin-created spaces, but if provided it must be valid.
+    let normalizedOwnerEmail = null;
+    let ownerUserId = null;
 
-if (ownerEmail && isValidEmail(ownerEmail)) {
-  normalizedOwnerEmail = ownerEmail.trim().toLowerCase();
-  const users = await loadUsersMeta();
-  const u = users.find(
-    (x) => (x.email || '').trim().toLowerCase() === normalizedOwnerEmail
-  );
-  ownerUserId = u ? u.id : null;
-}
-    
+    if (ownerEmail != null && String(ownerEmail).trim() !== '') {
+      const raw = String(ownerEmail).trim().toLowerCase();
+      if (!isValidEmail(raw)) {
+        return res.status(400).json({
+          error: 'bad_owner_email',
+          message: 'ownerEmail must be a valid email address.',
+        });
+      }
+
+      normalizedOwnerEmail = raw;
+
+      // Resolve owner user by email (best-effort)
+      const users = await loadUsersMeta();
+      const u = users.find((x) => (x.email || '').trim().toLowerCase() === normalizedOwnerEmail);
+      ownerUserId = u ? u.id : null;
+    }
+
     const spaces = await loadSpacesMeta();
     if (spaces.find((s) => s.slug === slug)) {
       console.log('[admin] slug already exists:', slug);
-      return res
-        .status(409)
-        .json({ error: 'space_exists', slug, message: 'slug already in use' });
+      return res.status(409).json({ error: 'space_exists', slug, message: 'slug already in use' });
     }
 
-    const now = new Date().toISOString();
+    const nowIso = new Date().toISOString();
     const dirPath = path.join(SPACES_ROOT, slug);
 
     console.log('[admin] creating dir:', dirPath);
@@ -3150,12 +3798,12 @@ if (ownerEmail && isValidEmail(ownerEmail)) {
       id: slug, // for now, id === slug
       slug,
       dirPath,
-      quotaMb: Number.isFinite(Number(quotaMb))
-        ? Number(quotaMb)
-        : 100, // default 100 MB
-      createdAt: now,
-      updatedAt: now,
+      quotaMb: Number.isFinite(Number(quotaMb)) ? Number(quotaMb) : 100,
+      createdAt: nowIso,
+      updatedAt: nowIso,
       status: 'active',
+
+      // Link space to a user if we can
       ownerEmail: normalizedOwnerEmail,
       ownerUserId,
     };
@@ -3165,34 +3813,13 @@ if (ownerEmail && isValidEmail(ownerEmail)) {
 
     console.log('[admin] space created:', spaceRecord);
 
-    res.status(201).json({
-      ok: true,
-      space: spaceRecord,
-    });
+    return res.status(201).json({ ok: true, space: spaceRecord });
   } catch (err) {
     console.error('[admin] error creating space:', err);
     next(err);
   }
 });
 
-// Admin: list workspace requests
-// GET /api/admin/space-requests?status=pending|approved|rejected
-app.get('/api/admin/space-requests', requireAdmin, async (req, res, next) => {
-  try {
-    const statusFilter = (req.query?.status || '').toString().trim();
-    const reqs = await loadWorkspaceRequests();
-
-    const filtered =
-      statusFilter && ['pending', 'approved', 'rejected'].includes(statusFilter)
-        ? reqs.filter((r) => r.status === statusFilter)
-        : reqs;
-
-    res.json({ ok: true, requests: filtered });
-  } catch (err) {
-    console.error('[workspace-requests] error listing requests', err);
-    next(err);
-  }
-});
 
 // Admin: approve a workspace request and create a space for the user
 // POST /api/admin/space-requests/:id/approve
@@ -3241,6 +3868,23 @@ app.post('/api/admin/space-requests/:id/approve', requireAdmin, requireEditorOri
         message: 'User referenced in request could not be found'
       });
     }
+
+    const billingIn = req.body?.billing || null;
+
+if (billingIn && typeof billingIn === 'object') {
+  user.billing = user.billing || {};
+  if ('comped' in billingIn) user.billing.comped = Boolean(billingIn.comped);
+  if ('paidUntil' in billingIn) user.billing.paidUntil = billingIn.paidUntil ? String(billingIn.paidUntil) : null;
+  if ('tier' in billingIn) user.billing.tier = billingIn.tier ? String(billingIn.tier) : null;
+
+  // optional notes
+  if ('notes' in billingIn) user.billing.notes = billingIn.notes ? String(billingIn.notes) : null;
+}
+
+user.status = 'active';
+user.updatedAt = new Date().toISOString();
+
+await saveUsersMeta(users);
 
     // Make sure we don't already have a space with this slug
     const spaces = await loadSpacesMeta();
@@ -3329,14 +3973,265 @@ app.post('/api/admin/space-requests/:id/approve', requireAdmin, requireEditorOri
   }
 });
 
+// Admin: list workspace requests
+// GET /api/admin/space-requests?status=pending|approved|rejected|all
+app.get('/api/admin/space-requests', requireAdmin, async (req, res, next) => {
+  try {
+    const statusRaw = String(req.query?.status || 'pending').trim().toLowerCase();
+
+    const allowed = new Set(['pending', 'approved', 'rejected', 'all']);
+    const status = allowed.has(statusRaw) ? statusRaw : 'pending';
+
+    const requests = await loadWorkspaceRequests();
+
+    const filtered =
+      status === 'all'
+        ? requests
+        : requests.filter((r) => String(r?.status || '').toLowerCase() === status);
+
+    // newest first (helps the admin UI)
+    filtered.sort((a, b) => {
+      const ta = Date.parse(a?.createdAt || '') || 0;
+      const tb = Date.parse(b?.createdAt || '') || 0;
+      return tb - ta;
+    });
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({
+      ok: true,
+      status,
+      requests: filtered,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ───────────────── Admin: Approved emails allowlist ─────────────────
+// Used by client/src/api.js:
+//  - GET    /api/admin/approved-users
+//  - POST   /api/admin/approved-users   body: { email }
+//  - DELETE /api/admin/approved-users   body: { email }
+
+app.get('/api/admin/approved-users', requireAdmin, async (req, res, next) => {
+  try {
+    const users = await loadApprovedUsers();
+    const sorted = (users || [])
+      .filter(Boolean)
+      .sort((a, b) => {
+        const ta = Date.parse(a?.createdAt || '') || 0;
+        const tb = Date.parse(b?.createdAt || '') || 0;
+        return tb - ta;
+      });
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok: true, users: sorted });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/admin/approved-users', requireAdmin, requireEditorOrigin, async (req, res, next) => {
+  try {
+    const emailRaw = String(req.body?.email || '').trim().toLowerCase();
+    if (!emailRaw || !isValidEmail(emailRaw)) {
+      return res.status(400).json({ error: 'bad_email', message: 'Provide a valid email.' });
+    }
+
+    const list = await loadApprovedUsers();
+    const normalized = emailRaw;
+
+    const exists = (list || []).some(
+      (u) => String(u?.email || '').trim().toLowerCase() === normalized
+    );
+
+    if (exists) {
+      // idempotent
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ ok: true, alreadyExists: true });
+    }
+
+    const nowIso = new Date().toISOString();
+    const nextList = [
+      ...(list || []),
+      { email: normalized, createdAt: nowIso },
+    ];
+
+    await saveApprovedUsers(nextList);
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(201).json({ ok: true, user: { email: normalized, createdAt: nowIso } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete('/api/admin/approved-users', requireAdmin, requireEditorOrigin, async (req, res, next) => {
+  try {
+    const emailRaw = String(req.body?.email || '').trim().toLowerCase();
+    if (!emailRaw || !isValidEmail(emailRaw)) {
+      return res.status(400).json({ error: 'bad_email', message: 'Provide a valid email.' });
+    }
+
+    const list = await loadApprovedUsers();
+    const normalized = emailRaw;
+
+    const before = (list || []).length;
+    const nextList = (list || []).filter(
+      (u) => String(u?.email || '').trim().toLowerCase() !== normalized
+    );
+
+    await saveApprovedUsers(nextList);
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok: true, removed: nextList.length !== before });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Admin-only: send an email to a user by userId
+// POST /api/admin/users/:id/email
+// headers: x-admin-token: <ADMIN_TOKEN>
+// body: { subject: string, text?: string, html?: string, from?: string }
+app.post('/api/admin/users/:id/email', requireAdmin, async (req, res, next) => {
+  try {
+    if (!SENDGRID_API_KEY || !SENDGRID_FROM) {
+      return res.status(503).json({
+        error: 'mail_disabled',
+        message: 'SendGrid is not configured (missing SENDGRID_API_KEY or SENDGRID_FROM).',
+      });
+    }
+
+    const userId = String(req.params.id || '').trim();
+    if (!userId) return res.status(400).json({ error: 'bad_user_id' });
+
+    const subject = String(req.body?.subject || '').trim();
+    const text = req.body?.text != null ? String(req.body.text) : '';
+    const html = req.body?.html != null ? String(req.body.html) : '';
+
+    // allow overriding "from" if you ever want (optional); default to SENDGRID_FROM
+    const from = String(req.body?.from || SENDGRID_FROM).trim();
+
+    if (!subject) {
+      return res.status(400).json({ error: 'missing_subject' });
+    }
+    if (!text && !html) {
+      return res.status(400).json({
+        error: 'missing_body',
+        message: 'Provide at least one of: text, html',
+      });
+    }
+
+    // Load user
+    const users = await loadUsersMeta();
+    const user = users.find((u) => u && u.id === userId) || null;
+    if (!user) return res.status(404).json({ error: 'user_not_found' });
+
+    const to = String(user.email || '').trim().toLowerCase();
+    if (!to || !isValidEmail(to)) {
+      return res.status(400).json({
+        error: 'user_missing_email',
+        message: 'User does not have a valid email on file.',
+        user: {
+          id: user.id,
+          discordId: user.discordId || null,
+          discordUsername: user.discordUsername || null,
+          discordGlobalName: user.discordGlobalName || null,
+          email: user.email || null,
+        },
+      });
+    }
+
+    // Send
+    const msg = {
+      to,
+      from,
+      subject,
+      ...(text ? { text } : {}),
+      ...(html ? { html } : {}),
+    };
+
+    await sgMail.send(msg);
+
+    console.log('[admin-email] sent', {
+      to,
+      userId,
+      subject,
+    });
+
+    return res.json({ ok: true, to, userId });
+  } catch (err) {
+    console.error('[admin-email] failed', err);
+    next(err);
+  }
+});
+
+async function sendWelcomeEmailToUser(user) {
+  if (!SENDGRID_API_KEY || !SENDGRID_FROM) {
+    console.log('[welcome-email] dev mode: would send welcome email to', user?.email);
+    return;
+  }
+
+  const to = String(user?.email || '').trim().toLowerCase();
+  if (!to || !isValidEmail(to)) {
+    console.warn('[welcome-email] skipped (missing/invalid email)', { userId: user?.id, to });
+    return;
+  }
+
+  const appBase = String(APP_BASE_URL || '').replace(/\/+$/, '');
+  const subject = 'Welcome to Portals iFrame Builder';
+
+  const text = [
+    'Welcome to Portals iFrame Builder!',
+    '',
+    'You’re in.',
+    'Next: request a workspace, then an admin will approve it.',
+    '',
+    `Open the app: ${appBase}/`,
+    '',
+    '— Portals iFrame Builder',
+  ].join('\n');
+
+  const html = `
+    <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:#020617; color:#e5e7eb; padding:24px;">
+      <table width="100%" cellspacing="0" cellpadding="0" style="max-width:520px;margin:0 auto;background:#0b1120;border-radius:14px;border:1px solid #1f2937;">
+        <tr>
+          <td style="padding:18px 20px 12px;border-bottom:1px solid #1f2937;">
+            <div style="font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:#22d3ee;margin-bottom:6px;">
+              Portals iFrame Builder
+            </div>
+            <div style="font-size:16px;font-weight:600;color:#e5e7eb;">
+              Welcome aboard
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:18px 20px;color:#cbd5f5;font-size:13px;line-height:1.4;">
+            <p style="margin:0 0 10px;">You’ve successfully signed in.</p>
+            <p style="margin:0 0 10px;">Next step: request a workspace. An admin will approve it and you’ll see it in your Spaces list.</p>
+            <p style="margin:0;">
+              <a href="${appBase}/" style="color:#22d3ee;text-decoration:none;">Open the app →</a>
+            </p>
+          </td>
+        </tr>
+      </table>
+    </div>
+  `;
+
+  await sgMail.send({ to, from: SENDGRID_FROM, subject, text, html });
+  console.log('[welcome-email] sent welcome email to', to);
+}
 
 // Admin: reject a workspace request
 // POST /api/admin/space-requests/:id/reject
 // body: { reason? }
+//
+// ✅ FIXED: now loads the user and sends a rejection email (best-effort)
 app.post('/api/admin/space-requests/:id/reject', requireAdmin, async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { reason } = req.body || {};
+    const reason = (req.body?.reason || '').toString().trim();
 
     const requests = await loadWorkspaceRequests();
     const idx = requests.findIndex((r) => r.id === id);
@@ -3348,28 +4243,60 @@ app.post('/api/admin/space-requests/:id/reject', requireAdmin, async (req, res, 
     if (reqRecord.status !== 'pending') {
       return res.status(400).json({
         error: 'bad_status',
-        message: `Request is already ${reqRecord.status}`
+        message: `Request is already ${reqRecord.status}`,
       });
     }
 
-    const now = new Date().toISOString();
+    const nowIso = new Date().toISOString();
     const updatedReq = {
       ...reqRecord,
       status: 'rejected',
-      updatedAt: now,
-      rejectedAt: now,
-      rejectReason: reason || null
+      updatedAt: nowIso,
+      rejectedAt: nowIso,
+      rejectReason: reason || null,
     };
 
+    // Persist request update
     requests[idx] = updatedReq;
     await saveWorkspaceRequests(requests);
 
     console.log('[workspace-requests] rejected', {
       requestId: id,
-      email: reqRecord.email
+      userId: updatedReq.userId,
+      email: updatedReq.email || null,
+      reason: updatedReq.rejectReason || null,
     });
 
-    res.json({ ok: true, request: updatedReq });
+    // ✅ Best-effort: load user and email them
+    try {
+      const users = await loadUsersMeta();
+
+      const byId =
+        users.find((u) => u && u.id === updatedReq.userId) || null;
+
+      const normReqEmail = String(updatedReq.email || '').trim().toLowerCase();
+      const byEmail =
+        !byId && normReqEmail
+          ? users.find((u) => (u?.email || '').trim().toLowerCase() === normReqEmail) || null
+          : null;
+
+      const user = byId || byEmail;
+
+      if (user) {
+        await sendWorkspaceRejectionEmailToUser(user, updatedReq);
+      } else {
+        console.warn('[workspace-email] rejection email skipped (user not found)', {
+          requestId: updatedReq.id,
+          userId: updatedReq.userId,
+          email: updatedReq.email || null,
+        });
+      }
+    } catch (mailErr) {
+      // Don't block the reject action if email fails
+      console.error('[workspace-email] failed to send rejection email (non-fatal)', mailErr);
+    }
+
+    return res.json({ ok: true, request: updatedReq });
   } catch (err) {
     console.error('[workspace-requests] error rejecting request', err);
     next(err);
@@ -3432,95 +4359,62 @@ app.use('/p/:slug', enforcePublicHostForP, portalsEmbedHeaders, async (req, res,
   }
 });
 
-
-
-// Admin: list approved emails (allowlist)
-// GET /api/admin/approved-users
-app.get('/api/admin/approved-users', requireAdmin, async (req, res, next) => {
-  try {
-    const users = await loadApprovedUsers();
-    res.json({ ok: true, users });
-  } catch (err) {
-    console.error('[allowlist] error listing approved users', err);
-    next(err);
-  }
+app.use('/api/auth/status', (req, res, next) => {
+  console.log('[debug] hit /api/auth/status', {
+    host: req.get('host'),
+    origin: req.get('origin'),
+    hasUser: !!req.user,
+    env: NODE_ENV,
+  });
+  next();
 });
 
-// Admin: add an email to the allowlist
-// POST /api/admin/approved-users
-// body: { email }
-app.post('/api/admin/approved-users', requireAdmin, async (req, res, next) => {
+// Auth status (lightweight)
+// GET /api/auth/status
+// Returns whether the current request has a valid session, plus a tiny user snapshot.
+app.get('/api/auth/status', async (req, res, next) => {
   try {
-    const rawEmail = (req.body?.email || '').toString().trim().toLowerCase();
-
-    if (!isValidEmail(rawEmail)) {
-      return res.status(400).json({
-        error: 'bad_email',
-        message: 'Invalid email address',
+    if (!req.user) {
+      return res.json({
+        ok: true,
+        loggedIn: false,
+        user: null,
+        spacesCount: 0,
       });
     }
 
-    const list = await loadApprovedUsers();
-    const exists = list.some(
-      (u) => (u.email || '').trim().toLowerCase() === rawEmail
-    );
-    if (exists) {
-      return res.status(409).json({
-        error: 'already_approved',
-        message: 'Email is already on the allowlist',
-      });
-    }
+    const spaces = await loadSpacesMeta();
+    const normalizedEmail = String(req.user.email || '').trim().toLowerCase();
 
-    const entry = {
-      email: rawEmail,
-      createdAt: new Date().toISOString(),
-    };
+    const spacesCount = spaces.filter((s) => {
+      if (!s || s.status !== 'active') return false;
+      if (s.ownerUserId && s.ownerUserId === req.user.id) return true;
+      if (normalizedEmail && s.ownerEmail && String(s.ownerEmail).trim().toLowerCase() === normalizedEmail) return true;
+      return false;
+    }).length;
 
-    list.push(entry);
-    await saveApprovedUsers(list);
+    return res.json({
+      ok: true,
+      loggedIn: true,
+      user: {
+        id: req.user.id,
 
-    console.log('[allowlist] added', rawEmail);
+        // email verification gate
+        email: req.user.email || null,
+        pendingEmail: req.user.pendingEmail || null,
+        emailVerifiedAt: req.user.emailVerifiedAt || null,
 
-    res.status(201).json({ ok: true, user: entry });
+        // discord snapshot for onboarding UI
+        discordId: req.user.discordId || null,
+        discordUsername: req.user.discordUsername || null,
+        discordGlobalName: req.user.discordGlobalName || null,
+        discordAvatar: req.user.discordAvatar || null,
+
+        status: req.user.status || 'active',
+      },
+      spacesCount,
+    });
   } catch (err) {
-    console.error('[allowlist] error adding approved user', err);
-    next(err);
-  }
-});
-
-// Admin: remove an email from the allowlist
-// DELETE /api/admin/approved-users
-// body: { email }
-app.delete('/api/admin/approved-users', requireAdmin, async (req, res, next) => {
-  try {
-    const rawEmail = (req.body?.email || '').toString().trim().toLowerCase();
-
-    if (!isValidEmail(rawEmail)) {
-      return res.status(400).json({
-        error: 'bad_email',
-        message: 'Invalid email address',
-      });
-    }
-
-    const list = await loadApprovedUsers();
-    const next = list.filter(
-      (u) => (u.email || '').trim().toLowerCase() !== rawEmail
-    );
-
-    if (next.length === list.length) {
-      return res.status(404).json({
-        error: 'not_found',
-        message: 'Email not found on allowlist',
-      });
-    }
-
-    await saveApprovedUsers(next);
-
-    console.log('[allowlist] removed', rawEmail);
-
-    res.json({ ok: true });
-  } catch (err) {
-    console.error('[allowlist] error removing approved user', err);
     next(err);
   }
 });
