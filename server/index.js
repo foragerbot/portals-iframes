@@ -51,6 +51,7 @@ import {
   PUBLIC_IFRAME_ORIGIN,
   APP_HOSTNAME,
   PUBLIC_IFRAME_HOSTNAME,
+  SESSION_MAX_AGE_DAYS
 } from './config.js';
 
 import { readJsonArray, writeJsonArray } from './stores/jsonStore.js';
@@ -1398,16 +1399,16 @@ async function sessionMiddleware(req, res, next) {
     if (!session) return next();
 
     // ✅ Server-side TTL (prevents stolen sid from working forever)
-    const maxDaysRaw = Number(process.env.SESSION_MAX_AGE_DAYS || 30);
+    const maxDaysRaw = Number(SESSION_MAX_AGE_DAYS);
     const maxDays = Number.isFinite(maxDaysRaw) && maxDaysRaw > 0 ? maxDaysRaw : 30;
     const ttlMs = maxDays * 24 * 60 * 60 * 1000;
 
     const createdAtMs = Date.parse(session.createdAt);
     const expired =
-      !Number.isFinite(createdAtMs) || Date.now() - createdAtMs > ttlMs;
+      !Number.isFinite(createdAtMs) || (Date.now() - createdAtMs) > ttlMs;
 
     // helper: revoke session + clear cookie
-    const revoke = async () => {
+    const revoke = async (why) => {
       const nextSessions = sessions.filter((s) => s.id !== sid);
       if (nextSessions.length !== sessions.length) {
         await saveSessionsMeta(nextSessions);
@@ -1417,26 +1418,34 @@ async function sessionMiddleware(req, res, next) {
         sameSite: 'lax',
         secure: IS_PROD,
       });
+
+      if (NODE_ENV === 'development') {
+        console.log('[session] revoked', sid, 'reason=', why);
+      }
     };
 
     if (expired) {
-      await revoke();
+      await revoke('expired');
       return next();
     }
 
     const users = await loadUsersMeta();
     const user = users.find((u) => u.id === session.userId);
     if (!user) {
-      await revoke();
+      await revoke('user_missing');
       return next();
     }
 
-    // ✅ Enforce allowlist on every request (revocation works immediately)
+    // ✅ Enforce allowlist + status on every request (revocation works immediately)
     const approved = await isEmailApproved(user.email);
     const status = String(user.status || 'active').toLowerCase();
 
-    if (!approved || status !== 'active') {
-      await revoke();
+    if (!approved) {
+      await revoke('not_allowlisted');
+      return next();
+    }
+    if (status !== 'active') {
+      await revoke('inactive_user');
       return next();
     }
 
@@ -1448,6 +1457,7 @@ async function sessionMiddleware(req, res, next) {
     return next();
   }
 }
+
 
 // Admin auth middleware using x-admin-token header
 function requireAdmin(req, res, next) {
