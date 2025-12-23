@@ -9,5 +9,27 @@
     "createdAt": "2025-12-22T18:08:28.801Z",
     "createdByUserId": "u_68b513754f7554aa8d855cc7acf60a80",
     "sizeBytes": 1250
+  },
+  {
+    "id": "fv_c245308b5912b06342d2c9326d25fb3d",
+    "fileId": "f_df07902fccffc1cb8ae93f7a5935c0f4",
+    "spaceSlug": "scott-hud",
+    "sha256": "ad376ab185999e137896e11ede1c9d9398dee2d55fe5c095b3760c28b0491701",
+    "action": "import",
+    "path": "pizza.html",
+    "createdAt": "2025-12-23T02:59:27.483Z",
+    "createdByUserId": "u_68b513754f7554aa8d855cc7acf60a80",
+    "sizeBytes": 20823
+  },
+  {
+    "id": "fv_522e6d3f119addb89f22dce58671d410",
+    "fileId": "f_df07902fccffc1cb8ae93f7a5935c0f4",
+    "spaceSlug": "scott-hud",
+    "sha256": "790fe3ffde641febc21df400471b28c7789d3817147820ad08ee571a3a28c149",
+    "action": "save",
+    "path": "pizza.html",
+    "createdAt": "2025-12-23T02:59:27.483Z",
+    "createdByUserId": "u_68b513754f7554aa8d855cc7acf60a80",
+    "sizeBytes": 35
   }
 ]

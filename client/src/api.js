@@ -43,6 +43,13 @@ export function startMagicLink(email) {
   });
 }
 
+export function verifyMagicLink(token) {
+  return request('/api/auth/magic/verify', {
+    method: 'POST',
+    body: JSON.stringify({ token }),
+  });
+}
+
 export function getSpacesForUser() {
   // wrapper around /api/me; could be extended later
   return getMe();

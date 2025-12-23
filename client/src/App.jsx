@@ -13,6 +13,7 @@ import {
   getSpaceUsage,
   callSpaceGpt,
   startMagicLink,
+  verifyMagicLink,
   deleteSpaceFile,
   renameSpaceFile,
   uploadSpaceAssets,
@@ -26,12 +27,13 @@ import {
   adminAddApprovedUser,
   adminRemoveApprovedUser,
 } from './api.js';
+
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { normalizeSlug, isValidSlug } from './slugUtils'; // ⬅️ ADD THIS
 import { extractBestCodeBlock, stripCodeFences } from './utils/extractBestCodeBlock';
 
-// at the top of App.jsx (or a separate file imported into it)
+// Highlight.js (safe)
 import hljs from 'highlight.js/lib/core';
 import javascript from 'highlight.js/lib/languages/javascript';
 import xml from 'highlight.js/lib/languages/xml'; // html
@@ -45,10 +47,61 @@ hljs.registerLanguage('xml', xml);
 hljs.registerLanguage('css', cssLang);
 hljs.registerLanguage('json', jsonLang);
 
+// Avoid highlight.js throwing on weird input
+try {
+  hljs.configure({ ignoreUnescapedHTML: true });
+} catch {
+  // ok on older versions
+}
 
-const IFRAME_ORIGIN =
-  import.meta.env.VITE_IFRAME_ORIGIN ||
-  window.location.origin.replace(/\/+$/, '');
+// ✅ Critical: escape fallback for any dangerous innerHTML paths
+function escapeHtml(unsafe) {
+  return String(unsafe ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// ✅ Single safe highlighting function (never returns raw code)
+function highlightToHtmlSafe(codeText, lang) {
+  const text = String(codeText ?? '');
+
+  try {
+    if (lang && hljs.getLanguage(lang)) {
+      return hljs.highlight(text, { language: lang, ignoreIllegals: true }).value || escapeHtml(text);
+    }
+    return hljs.highlightAuto(text).value || escapeHtml(text);
+  } catch (err) {
+    console.error('[hljs] highlight failed', err);
+    return escapeHtml(text);
+  }
+}
+
+
+const IFRAME_ORIGIN = (() => {
+  const raw = import.meta.env.VITE_IFRAME_ORIGIN;
+  const cleaned = raw ? String(raw).replace(/\/+$/, '') : '';
+
+  if (import.meta.env.PROD) {
+    if (!cleaned) {
+      throw new Error(
+        'VITE_IFRAME_ORIGIN is required in production (set it to your public iframe host origin).'
+      );
+    }
+    const editorOrigin = window.location.origin.replace(/\/+$/, '');
+    if (cleaned === editorOrigin) {
+      throw new Error(
+        'VITE_IFRAME_ORIGIN must be different from the editor origin in production.'
+      );
+    }
+    return cleaned;
+  }
+
+  // Dev fallback
+  return cleaned || window.location.origin.replace(/\/+$/, '');
+})();
 
 function useMe() {
   const [me, setMe] = useState(null);
@@ -81,9 +134,65 @@ function useMe() {
 }
 
 function LoginPage() {
+  const navigate = useNavigate();
+
   const [email, setEmail] = useState('');
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
+
+  // Prevent double-consume in React 18 StrictMode (dev only)
+  const didConsumeRef = useRef(false);
+
+  // Auto-consume magic token from URL hash (preferred) or query (fallback)
+  useEffect(() => {
+    const run = async () => {
+      const hashParams = new URLSearchParams(
+        (window.location.hash || '').replace(/^#/, '')
+      );
+      const tokenFromHash = hashParams.get('token');
+
+      const queryParams = new URLSearchParams(window.location.search || '');
+      const tokenFromQuery = queryParams.get('token');
+
+      const token = tokenFromHash || tokenFromQuery;
+      if (!token) return;
+
+      // ✅ guard against double effect execution
+      if (didConsumeRef.current) return;
+      didConsumeRef.current = true;
+
+      setBusy(true);
+      setStatus('Signing you in…');
+
+      try {
+        await verifyMagicLink(token);
+
+        // Clear token from URL (removes hash + any ?token= fallback)
+        const cleanedSearch = window.location.search
+          .replace(/([?&])token=[^&]+(&|$)/, '$1')
+          .replace(/[?&]$/, '');
+
+        window.history.replaceState(
+          null,
+          '',
+          window.location.pathname + cleanedSearch
+        );
+
+        setStatus('Signed in. Redirecting…');
+        navigate('/', { replace: true });
+      } catch (err) {
+        console.error(err);
+        setStatus(
+          err.payload?.message ||
+            'This login link is invalid or expired. Please request a new one.'
+        );
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    run();
+  }, [navigate]);
 
   const onSubmit = async (e) => {
     e.preventDefault();
@@ -92,7 +201,7 @@ function LoginPage() {
     setStatus('');
     try {
       await startMagicLink(email);
-      setStatus('Magic link sent. Check your email and click the link to sign in (opens a new window or tab).');
+      setStatus('Magic link sent. Check your email and click the link to sign in.');
     } catch (err) {
       console.error(err);
       setStatus(err.payload?.message || 'Failed to send magic link.');
@@ -105,12 +214,7 @@ function LoginPage() {
     <div className="login-shell">
       <div className="login-card">
         <h1>Sign in to Portals iFrame Builder</h1>
-        <p>
-          First-time users: Enter the email where you want to receive a login link. Click the link in the email to initiative your iFrame builder workspace.
-        </p>
-        <p>
-          Returning users: Re-enter your email to access your saved workspaces. Login link will be sent to your email.
-        </p>
+
         <form onSubmit={onSubmit}>
           <input
             type="email"
@@ -119,16 +223,19 @@ function LoginPage() {
             onChange={(e) => setEmail(e.target.value)}
             autoComplete="email"
             required
+            disabled={busy}
           />
           <button className="button primary" type="submit" disabled={busy}>
-            {busy ? 'Sending…' : 'Send magic link'}
+            {busy ? 'Working…' : 'Send magic link'}
           </button>
         </form>
+
         <div className="login-status">{status}</div>
       </div>
     </div>
   );
 }
+
 
 function LayoutShell({ me, usage, onLogout, children }) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
@@ -686,14 +793,16 @@ function AssetsPanel({ slug, onUsageRefresh, onAssetCountChange }) {
                     </div>
                   );
                 }
-                return (
-                  <iframe
-                    key={assetPreviewKey}
-                    src={assetPreviewUrl}
-                    title={`Preview ${assetPreviewName}`}
-                    className="preview-modal-media"
-                  />
-                );
+return (
+  <iframe
+    key={assetPreviewKey}
+    src={assetPreviewUrl}
+    title={`Preview ${assetPreviewName}`}
+    className="preview-modal-media"
+    sandbox="allow-scripts allow-forms"
+    referrerPolicy="no-referrer"
+  />
+);
               })()}
             </div>
           </div>
@@ -1350,19 +1459,10 @@ function SpaceEditor({
   // Editor language + highlighted HTML
   const editorLang = inferPreferredLangFromPath(selectedPath);
 
-  const highlightedEditorHtml = useMemo(() => {
-    const codeText = fileContent || '';
+const highlightedEditorHtml = useMemo(() => {
+  return highlightToHtmlSafe(fileContent || '', editorLang);
+}, [fileContent, editorLang]);
 
-    try {
-      if (editorLang && hljs.getLanguage(editorLang)) {
-        return hljs.highlight(codeText, { language: editorLang }).value;
-      }
-      return hljs.highlightAuto(codeText).value;
-    } catch (err) {
-      console.error('highlight.js (editor) error', err);
-      return codeText;
-    }
-  }, [fileContent, editorLang]);
 
   const handleEditorScroll = (e) => {
     const pre = editorHighlightRef.current;
@@ -1900,112 +2000,62 @@ function SpaceEditor({
                                     </li>
                                   );
                                 },
-                                code({
-                                  inline,
-                                  className,
-                                  children,
-                                  ...props
-                                }) {
-                                  const text = String(children || '');
-                                  const codeText =
-                                    text.replace(/\n$/, '');
+code({ inline, className, children, ...props }) {
+  const text = String(children || '');
+  const codeText = text.replace(/\n$/, '');
 
-                                  const match =
-                                    typeof className === 'string'
-                                      ? /language-(\w+)/.exec(
-                                          className
-                                        )
-                                      : null;
-                                  const lang =
-                                    match?.[1]?.toLowerCase();
+  const match =
+    typeof className === 'string'
+      ? /language-(\w+)/.exec(className)
+      : null;
+  const lang = match?.[1]?.toLowerCase() || '';
 
-                                  const handleCopy = async () => {
-                                    try {
-                                      if (
-                                        navigator.clipboard?.writeText
-                                      ) {
-                                        await navigator.clipboard.writeText(
-                                          codeText
-                                        );
-                                      } else {
-                                        window.prompt(
-                                          'Copy code:',
-                                          codeText
-                                        );
-                                      }
-                                    } catch (err) {
-                                      console.error(
-                                        'Copy failed',
-                                        err
-                                      );
-                                    }
-                                  };
+  const handleCopy = async () => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(codeText);
+      } else {
+        window.prompt('Copy code:', codeText);
+      }
+    } catch (err) {
+      console.error('Copy failed', err);
+    }
+  };
 
-                                  if (inline) {
-                                    return (
-                                      <code
-                                        className="gpt-inline-code"
-                                        {...props}
-                                      >
-                                        {children}
-                                      </code>
-                                    );
-                                  }
+  if (inline) {
+    return (
+      <code className="gpt-inline-code" {...props}>
+        {children}
+      </code>
+    );
+  }
 
-                                  let highlightedHtml = codeText;
-                                  try {
-                                    if (
-                                      lang &&
-                                      hljs.getLanguage(lang)
-                                    ) {
-                                      highlightedHtml =
-                                        hljs.highlight(codeText, {
-                                          language: lang,
-                                        }).value;
-                                    } else {
-                                      highlightedHtml =
-                                        hljs.highlightAuto(
-                                          codeText
-                                        ).value;
-                                    }
-                                  } catch (err) {
-                                    console.error(
-                                      'highlight.js error',
-                                      err
-                                    );
-                                    highlightedHtml = codeText;
-                                  }
+  const highlightedHtml = highlightToHtmlSafe(codeText, lang);
 
-                                  const codeClass = ['hljs', className]
-                                    .filter(Boolean)
-                                    .join(' ');
+  const codeClass = ['hljs', className].filter(Boolean).join(' ');
 
-                                  return (
-                                    <div className="gpt-code-block">
-                                      <div className="gpt-code-header">
-                                        <span className="gpt-code-lang">
-                                          {lang || 'code'}
-                                        </span>
-                                        <button
-                                          type="button"
-                                          className="gpt-code-copy-btn"
-                                          onClick={handleCopy}
-                                        >
-                                          Copy
-                                        </button>
-                                      </div>
-                                      <pre className="gpt-code">
-                                        <code
-                                          className={codeClass}
-                                          dangerouslySetInnerHTML={{
-                                            __html: highlightedHtml,
-                                          }}
-                                          {...props}
-                                        />
-                                      </pre>
-                                    </div>
-                                  );
-                                },
+  return (
+    <div className="gpt-code-block">
+      <div className="gpt-code-header">
+        <span className="gpt-code-lang">{lang || 'code'}</span>
+        <button
+          type="button"
+          className="gpt-code-copy-btn"
+          onClick={handleCopy}
+        >
+          Copy
+        </button>
+      </div>
+      <pre className="gpt-code">
+        <code
+          className={codeClass}
+          dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+          {...props}
+        />
+      </pre>
+    </div>
+  );
+}
                               }}
                             >
                               {msg.content}
@@ -2323,14 +2373,18 @@ function SpaceEditor({
               </button>
             </div>
             <div className="preview-modal-body preview-modal-body--iframe">
-              <iframe
-                key={previewReloadKey}
-                src={`${IFRAME_ORIGIN}/p/${encodeURIComponent(
-                  slug
-                )}/${encodeURIComponent(selectedPath)}`}
-                title={`Preview ${slug}/${selectedPath}`}
-                className="preview-modal-iframe"
-              />
+<iframe
+  key={previewReloadKey}
+  src={`${IFRAME_ORIGIN}/p/${encodeURIComponent(slug)}/${encodeURIComponent(selectedPath)}`}
+  title={`Preview ${slug}/${selectedPath}`}
+  className="preview-modal-iframe"
+  // ✅ No allow-modals => alert/confirm/prompt are blocked (your “XSS” popup goes away)
+  // ✅ No allow-same-origin => even if you accidentally serve /p on same origin in dev,
+  //    the iframe can’t read cookies/localStorage of the editor origin.
+  sandbox="allow-scripts allow-forms"
+  referrerPolicy="no-referrer"
+/>
+
             </div>
           </div>
         </div>

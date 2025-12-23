@@ -47,10 +47,67 @@ import {
   FILE_VERSIONS_META_PATH,
   HISTORY_DIR_NAME,
   HISTORY_BLOBS_DIR_NAME,
+  APP_ORIGIN,
+  PUBLIC_IFRAME_ORIGIN,
+  APP_HOSTNAME,
+  PUBLIC_IFRAME_HOSTNAME,
 } from './config.js';
 
 import { readJsonArray, writeJsonArray } from './stores/jsonStore.js';
+// ───────────────── Public host isolation helpers ─────────────────
 
+function safeParseUrl(str) {
+  try {
+    return new URL(String(str || ''));
+  } catch {
+    return null;
+  }
+}
+
+function canonicalHost(host) {
+  const h = String(host || '').trim().toLowerCase();
+  if (!h) return '';
+  // normalize common local dev equivalents
+  return h
+    .replace('127.0.0.1', 'localhost')
+    .replace('[::1]', 'localhost');
+}
+
+function firstForwardedHost(v) {
+  const raw = String(v || '');
+  if (!raw) return '';
+  return canonicalHost(raw.split(',')[0].trim());
+}
+
+const APP_URL = safeParseUrl(APP_BASE_URL);
+const PUBLIC_URL = safeParseUrl(PUBLIC_IFRAME_BASE_URL);
+
+const APP_HOST = canonicalHost(APP_URL?.host || '');
+const PUBLIC_HOST = canonicalHost(PUBLIC_URL?.host || '');
+const PUBLIC_ORIGIN = PUBLIC_URL?.origin ? String(PUBLIC_URL.origin).replace(/\/+$/, '') : '';
+
+const ENFORCE_PUBLIC_P_HOST = Boolean(PUBLIC_HOST && APP_HOST && PUBLIC_HOST !== APP_HOST);
+
+function enforcePublicHostForP(req, res, next) {
+  if (!ENFORCE_PUBLIC_P_HOST) return next();
+  if (!PUBLIC_ORIGIN || !PUBLIC_HOST) return next();
+
+  // Try forwarded host first (reverse proxies), then raw host.
+  const xfHost = firstForwardedHost(req.get('x-forwarded-host'));
+  const host = canonicalHost(req.get('host'));
+
+  // In dev, this helps you see why redirects aren’t happening.
+  if (NODE_ENV === 'development') {
+    console.log('[p-host] host=', host, 'xfHost=', xfHost, 'publicHost=', PUBLIC_HOST);
+  }
+
+  const seenHost = xfHost || host;
+
+  if (seenHost === PUBLIC_HOST) return next();
+
+  res.setHeader('Cache-Control', 'no-store');
+  return res.redirect(302, `${PUBLIC_ORIGIN}${req.originalUrl}`);
+}
 
 const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
@@ -850,17 +907,30 @@ function portalsEmbedHeaders(req, res, next) {
   res.removeHeader('X-Frame-Options');
 
   // Configure via env so you can tune without code deploy
-const ancestors = PORTALS_FRAME_ANCESTORS;
-
-  // If you don't know the Portals hostnames yet, start permissive, tighten later
+  const ancestors = PORTALS_FRAME_ANCESTORS;
   const frameAncestors = ancestors || '*';
 
-  // Important: CSP is per-response. This is the modern replacement for XFO.
-  res.setHeader('Content-Security-Policy', `frame-ancestors ${frameAncestors};`);
-  res.setHeader('Cross-Origin-Resource-Policy', 'same-site');
+  // ✅ Safety: sandbox public overlays so they can’t become “same-origin attackers”
+  // - allow-scripts: overlays can run JS
+  // - allow-forms: ok for basic forms
+  // - NOT allow-same-origin: keeps an opaque origin (blocks storage + same-origin API reads)
+  // - NOT allow-modals: blocks alert/confirm/prompt (optional, but safer + less annoying)
+  const csp = [
+    `frame-ancestors ${frameAncestors}`,
+    `sandbox allow-scripts allow-forms`,
+  ].join('; ') + ';';
+
+  res.setHeader('Content-Security-Policy', csp);
+
+  // ✅ Don’t leak URLs as referrers
+  res.setHeader('Referrer-Policy', 'no-referrer');
+
+  // Safer default for broad embedding environments (Unity/webviews/etc.)
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
 
   next();
 }
+
 
 async function sendMagicLinkEmail(email, url) {
   // If SendGrid isn't configured, fall back to dev-mode logging
@@ -1394,18 +1464,52 @@ app.use(
   })
 );
 
+// ───────────────── Host gating (production) ─────────────────
+// Prevent the public iframe hostname from ever serving /api,
+// and prevent the editor hostname from ever serving /p.
+// This matters even if both hostnames hit the same Express server.
+
+function hostEquals(req, expectedHostname) {
+  if (!expectedHostname) return true;
+  return String(req.hostname || '').toLowerCase() === String(expectedHostname).toLowerCase();
+}
+
+if (IS_PROD && APP_HOSTNAME && PUBLIC_IFRAME_HOSTNAME && APP_HOSTNAME !== PUBLIC_IFRAME_HOSTNAME) {
+  app.use('/api', (req, res, next) => {
+    if (!hostEquals(req, APP_HOSTNAME)) {
+      return res.status(404).json({ error: 'not_found' });
+    }
+    next();
+  });
+
+  app.use('/p', (req, res, next) => {
+    if (!hostEquals(req, PUBLIC_IFRAME_HOSTNAME)) {
+      return res.status(404).send('Not found');
+    }
+    next();
+  });
+
+  console.log('[host-gate] /api allowed only on', APP_HOSTNAME);
+  console.log('[host-gate] /p allowed only on', PUBLIC_IFRAME_HOSTNAME);
+}
+
+// ───────────────── Origin allowlists ─────────────────
+// Only the editor UI origin should be allowed to make credentialed API calls.
+// DO NOT include the public iframe origin here.
+
+const DEV_ORIGINS = IS_PROD
+  ? []
+  : [
+      'http://localhost:4100',
+      'http://localhost:5173',
+    ];
+
 const EDITOR_ORIGINS = new Set([
-  'https://iframes.jawn.bot',
-  // Dev origins:
-  'http://localhost:4100',
-  'http://localhost:5173',
+  ...(APP_ORIGIN ? [APP_ORIGIN] : []),
+  ...DEV_ORIGINS,
 ]);
 
-const ALLOWED_ORIGINS = [
-  'https://iframes.jawn.bot',
-  'http://localhost:4100', // dev UI
-  'http://localhost:5173', // if you’re running Vite locally
-];
+const ALLOWED_ORIGINS = Array.from(EDITOR_ORIGINS);
 
 app.use(
   '/api',
@@ -1419,18 +1523,30 @@ app.use(
       }
 
       console.warn('[cors] blocked origin:', origin);
-      return cb(new Error('Not allowed by CORS'));
+      // ✅ Don’t throw; just omit CORS headers so the browser can’t read responses
+      return cb(null, false);
     },
     credentials: true,
   })
 );
 
 
-// Logs
+// ───────────────── Logs ─────────────────
+
+// Redact magic token from any logged URL or Referer.
+// This protects legacy links that still hit /api/auth/magic/verify?token=...
+morgan.token('safe-url', (req) => redactMagicTokenFromUrl(req.originalUrl));
+morgan.token('safe-ref', (req) => redactMagicTokenFromUrl(req.get('referer') || '-'));
+
 if (NODE_ENV === 'development') {
   app.use(morgan('dev'));
 } else {
-  app.use(morgan('combined'));
+  const combinedSafe =
+    ':remote-addr - :remote-user [:date[clf]] ' +
+    '":method :safe-url HTTP/:http-version" :status :res[content-length] ' +
+    '":safe-ref" ":user-agent"';
+
+  app.use(morgan(combinedSafe));
 }
 
 // ───────────────── Health / version ─────────────────
@@ -1453,6 +1569,7 @@ app.get('/api/version', (req, res) => {
 });
 
 // ───────────────── Magic-link auth ─────────────────
+
 // Start magic link: POST /api/auth/magic/start { email }
 app.post('/api/auth/magic/start', magicLinkRateLimiter, async (req, res, next) => {
   try {
@@ -1464,7 +1581,7 @@ app.post('/api/auth/magic/start', magicLinkRateLimiter, async (req, res, next) =
         .status(400)
         .json({ error: 'bad_email', message: 'Invalid email address' });
     }
-    
+
     // Invite-only gate: only approved emails can receive magic links
     const approved = await isEmailApproved(normalizedEmail);
     if (!approved) {
@@ -1488,112 +1605,156 @@ app.post('/api/auth/magic/start', magicLinkRateLimiter, async (req, res, next) =
     });
     await saveTokensMeta(tokens);
 
-    const base = APP_BASE_URL.replace(/\/+$/, '');
-    const verifyUrl = `${base}/api/auth/magic/verify?token=${encodeURIComponent(
-      token
-    )}&redirect=1`;
+    // ✅ NEW: Put the token in the URL hash so it never hits server logs or Referer headers
+    const appBase = APP_BASE_URL.replace(/\/+$/, '');
+    const loginUrl = `${appBase}/login#token=${encodeURIComponent(token)}`;
 
-
-    await sendMagicLinkEmail(normalizedEmail, verifyUrl);
+    await sendMagicLinkEmail(normalizedEmail, loginUrl);
 
     console.log(`[auth] magic link created for ${normalizedEmail}`);
-
     res.json({ ok: true });
   } catch (err) {
     next(err);
   }
 });
 
-// Verify magic link: GET /api/auth/magic/verify?token=...
-app.get('/api/auth/magic/verify', async (req, res, next) => {
+// In-process lock queue (single Node process)
+// Prevents races like "same token consumed twice" under concurrent requests.
+const __locks = new Map();
+
+async function withInProcessLock(key, fn) {
+  const prev = __locks.get(key) || Promise.resolve();
+
+  let release;
+  const current = new Promise((resolve) => (release = resolve));
+
+  // Queue: next waits for prev, then waits for current to release
+  const next = prev.then(() => current);
+  __locks.set(key, next);
+
+  await prev;
+
+  try {
+    return await fn();
+  } finally {
+    release();
+    // Only delete if nobody queued after us
+    if (__locks.get(key) === next) {
+      __locks.delete(key);
+    }
+  }
+}
+
+// Shared helper: consumes a magic token, creates user+session, sets sid cookie.
+async function consumeMagicTokenAndSetSessionCookie({ token, req, res }) {
+  if (!token || typeof token !== 'string') {
+    return { ok: false, status: 400, payload: { error: 'bad_token', message: 'Invalid token' } };
+  }
+
+  const tokens = await loadTokensMeta();
+  const idx = tokens.findIndex((t) => t.id === token);
+  if (idx === -1) {
+    return { ok: false, status: 400, payload: { error: 'invalid_token', message: 'Token not found' } };
+  }
+
+  const t = tokens[idx];
+
+  if (t.usedAt) {
+    return { ok: false, status: 400, payload: { error: 'used_token', message: 'Token already used' } };
+  }
+
+  const now = new Date();
+  if (new Date(t.expiresAt).getTime() < now.getTime()) {
+    return { ok: false, status: 400, payload: { error: 'expired_token', message: 'Token expired' } };
+  }
+
+  // Find or create user
+  const users = await loadUsersMeta();
+  let user = users.find((u) => u.email === t.email);
+
+  if (!user) {
+    user = {
+      id: generateId('u_'),
+      email: t.email,
+      createdAt: now.toISOString(),
+      roles: ['user'],
+    };
+    users.push(user);
+    await saveUsersMeta(users);
+    console.log('[auth] created new user', user);
+  } else {
+    console.log('[auth] existing user login', user.id, user.email);
+  }
+
+  // Mark token as used
+  tokens[idx] = { ...t, usedAt: now.toISOString() };
+  await saveTokensMeta(tokens);
+
+  // Create session
+  const sessions = await loadSessionsMeta();
+  const sessionId = generateId('sid_');
+  const session = {
+    id: sessionId,
+    userId: user.id,
+    email: user.email,
+    createdAt: now.toISOString(),
+    userAgent: req.get('user-agent') || null,
+    ip: req.ip || null,
+  };
+  sessions.push(session);
+  await saveSessionsMeta(sessions);
+
+  // Set cookie
+  res.cookie('sid', sessionId, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: IS_PROD,
+    maxAge: 1000 * 60 * 60 * 24 * 30, // 30 days
+  });
+
+  return { ok: true, user };
+}
+
+// ✅ NEW: Verify magic token via POST body (token never appears in URL)
+app.post('/api/auth/magic/verify', async (req, res, next) => {
   res.setHeader('Cache-Control', 'no-store');
   try {
-    const { token, redirect } = req.query || {};
-    const wantsRedirect = redirect === '1';
+    const { token } = req.body || {};
 
-    if (!token || typeof token !== 'string') {
-      return res.status(400).json({ error: 'bad_token' });
-    }
+    const result = await consumeMagicTokenAndSetSessionCookie({ token, req, res });
+    if (!result.ok) return res.status(result.status).json(result.payload);
 
-    const tokens = await loadTokensMeta();
-    const idx = tokens.findIndex((t) => t.id === token);
-    if (idx === -1) {
-      return res
-        .status(400)
-        .json({ error: 'invalid_token', message: 'Token not found' });
-    }
-
-    const t = tokens[idx];
-    if (t.usedAt) {
-      return res
-        .status(400)
-        .json({ error: 'used_token', message: 'Token already used' });
-    }
-
-    const now = new Date();
-    if (new Date(t.expiresAt).getTime() < now.getTime()) {
-      return res
-        .status(400)
-        .json({ error: 'expired_token', message: 'Token expired' });
-    }
-
-    const users = await loadUsersMeta();
-    let user = users.find((u) => u.email === t.email);
-
-    if (!user) {
-      user = {
-        id: generateId('u_'),
-        email: t.email,
-        createdAt: now.toISOString(),
-        roles: ['user'],
-      };
-      users.push(user);
-      await saveUsersMeta(users);
-      console.log('[auth] created new user', user);
-    } else {
-      console.log('[auth] existing user login', user.id, user.email);
-    }
-
-    // Mark token as used
-    tokens[idx] = { ...t, usedAt: now.toISOString() };
-    await saveTokensMeta(tokens);
-
-    // Create session
-    const sessions = await loadSessionsMeta();
-    const sessionId = generateId('sid_');
-    const session = {
-      id: sessionId,
-      userId: user.id,
-      email: user.email,
-      createdAt: now.toISOString(),
-      userAgent: req.get('user-agent') || null,
-      ip: req.ip || null,
-    };
-    sessions.push(session);
-    await saveSessionsMeta(sessions);
-
-    // Set cookie
-    res.cookie('sid', sessionId, {
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: IS_PROD, // in prod, cookie only over HTTPS
-      maxAge: 1000 * 60 * 60 * 24 * 30, // 30 days
-    });
-
-    // For now, just return JSON. Later the frontend can redirect after this.
-    const appBase = APP_BASE_URL.replace(/\/+$/, '');
-
-    if (wantsRedirect) {
-      // After verification, send user to the app UI rather than showing JSON
-      return res.redirect(302, `${appBase}/`);
-    }
-
-    // Fallback: JSON response (useful for curl / debugging)
-    res.json({ ok: true, user });
+    // Keep response minimal; cookie is the real session
+    res.json({ ok: true, user: { id: result.user.id, email: result.user.email } });
   } catch (err) {
     next(err);
   }
 });
+
+// Legacy support: GET /api/auth/magic/verify?token=...&redirect=1
+// ✅ No longer consumes token here. It just bounces into /login#token=... so the token leaves query-string land.
+app.post('/api/auth/magic/verify', async (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const { token } = req.body || {};
+
+    if (!token || typeof token !== 'string') {
+      return res.status(400).json({ error: 'bad_token', message: 'Invalid token' });
+    }
+
+    // ✅ lock per-token so it can’t be consumed twice concurrently
+    const result = await withInProcessLock(`magic:${token}`, async () => {
+      return consumeMagicTokenAndSetSessionCookie({ token, req, res });
+    });
+
+    if (!result.ok) return res.status(result.status).json(result.payload);
+
+    res.json({ ok: true, user: { id: result.user.id, email: result.user.email } });
+  } catch (err) {
+    next(err);
+  }
+});
+
 
 // Logout: POST /api/auth/logout
 app.post('/api/auth/logout', async (req, res, next) => {
@@ -1610,7 +1771,6 @@ app.post('/api/auth/logout', async (req, res, next) => {
       }
     }
 
-    // Clear the cookie (must match the options used when setting it)
     res.clearCookie('sid', {
       httpOnly: true,
       sameSite: 'lax',
@@ -3161,7 +3321,7 @@ app.post('/api/admin/space-requests/:id/reject', requireAdmin, async (req, res, 
 // ───────────────── Public space serving (static) ─────────────────
 
 // Serve static files for a space at /p/:slug/... (e.g. /p/demo-hud/index.html)
-app.use('/p/:slug', portalsEmbedHeaders, async (req, res, next) => {
+app.use('/p/:slug', enforcePublicHostForP, portalsEmbedHeaders, async (req, res, next) => {
   try {
     await ensureSpacesRoot();
     const { slug } = req.params;
@@ -3188,7 +3348,7 @@ app.use('/p/:slug', portalsEmbedHeaders, async (req, res, next) => {
       }
     }
 
-          // Never serve internal history, even if it exists on disk
+    // Never serve internal history, even if it exists on disk
     const reqRel = normalizeRelPosix(req.path || '');
     if (isHistoryRelPath(reqRel)) {
       return res.status(404).send('Not found');
@@ -3213,6 +3373,7 @@ app.use('/p/:slug', portalsEmbedHeaders, async (req, res, next) => {
     next(err);
   }
 });
+
 
 
 // Admin: list approved emails (allowlist)

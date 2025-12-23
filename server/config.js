@@ -12,6 +12,22 @@ function stripTrailingSlashes(s) {
   return String(s || '').replace(/\/+$/, '');
 }
 
+function safeUrlOrigin(u) {
+  try {
+    return new URL(String(u)).origin;
+  } catch {
+    return null;
+  }
+}
+
+function safeUrlHostname(u) {
+  try {
+    return new URL(String(u)).hostname;
+  } catch {
+    return null;
+  }
+}
+
 export const ROOT_DIR = path.join(__dirname, '..');
 
 export const NODE_ENV = process.env.NODE_ENV || 'development';
@@ -30,16 +46,41 @@ export const MAX_PENDING_WORKSPACE_REQUESTS = Number(
   process.env.MAX_PENDING_WORKSPACE_REQUESTS || 1
 );
 
-// Where the editor/app lives (used for redirects + "open app" links)
+// Where the editor/app lives (used for email links + redirects)
 export const APP_BASE_URL = stripTrailingSlashes(
   process.env.APP_BASE_URL || `http://localhost:${PORT}`
 );
 
-// Where public iframes are served (used for iframe links in emails, etc.)
-// Default falls back to APP_BASE_URL to preserve current behavior if unset.
+// Where public iframes are served (used for iframe links in emails)
+// IMPORTANT: in production this should be a DIFFERENT origin than APP_BASE_URL.
 export const PUBLIC_IFRAME_BASE_URL = stripTrailingSlashes(
   process.env.PUBLIC_IFRAME_BASE_URL || APP_BASE_URL
 );
+
+// Derived origins/hostnames (used to enforce separation)
+export const APP_ORIGIN = safeUrlOrigin(APP_BASE_URL);
+export const PUBLIC_IFRAME_ORIGIN = safeUrlOrigin(PUBLIC_IFRAME_BASE_URL);
+
+export const APP_HOSTNAME = safeUrlHostname(APP_BASE_URL);
+export const PUBLIC_IFRAME_HOSTNAME = safeUrlHostname(PUBLIC_IFRAME_BASE_URL);
+
+// ✅ Production guard: refuse to start if public overlays share the editor origin
+if (IS_PROD) {
+  if (!APP_ORIGIN) {
+    throw new Error(`APP_BASE_URL must be a valid absolute URL in production. Got: ${APP_BASE_URL}`);
+  }
+  if (!PUBLIC_IFRAME_ORIGIN) {
+    throw new Error(
+      `PUBLIC_IFRAME_BASE_URL must be a valid absolute URL in production. Got: ${PUBLIC_IFRAME_BASE_URL}`
+    );
+  }
+  if (APP_ORIGIN === PUBLIC_IFRAME_ORIGIN) {
+    throw new Error(
+      `Misconfig: PUBLIC_IFRAME_BASE_URL must be a DIFFERENT origin than APP_BASE_URL in production.\n` +
+      `APP_BASE_URL=${APP_BASE_URL}\nPUBLIC_IFRAME_BASE_URL=${PUBLIC_IFRAME_BASE_URL}`
+    );
+  }
+}
 
 // Workspace root on disk
 export const SPACES_ROOT = path.join(ROOT_DIR, 'spaces');
