@@ -54,7 +54,8 @@ import {
 } from './config.js';
 
 import { readJsonArray, writeJsonArray } from './stores/jsonStore.js';
-// ───────────────── Public host isolation helpers ─────────────────
+
+// ───────────────── Host isolation (public /p host vs app /api host) ─────────────────
 
 function safeParseUrl(str) {
   try {
@@ -67,7 +68,6 @@ function safeParseUrl(str) {
 function canonicalHost(host) {
   const h = String(host || '').trim().toLowerCase();
   if (!h) return '';
-  // normalize common local dev equivalents
   return h
     .replace('127.0.0.1', 'localhost')
     .replace('[::1]', 'localhost');
@@ -86,28 +86,46 @@ const APP_HOST = canonicalHost(APP_URL?.host || '');
 const PUBLIC_HOST = canonicalHost(PUBLIC_URL?.host || '');
 const PUBLIC_ORIGIN = PUBLIC_URL?.origin ? String(PUBLIC_URL.origin).replace(/\/+$/, '') : '';
 
-const ENFORCE_PUBLIC_P_HOST = Boolean(PUBLIC_HOST && APP_HOST && PUBLIC_HOST !== APP_HOST);
+// Enable isolation only if both are set and actually different
+const HOST_ISOLATION_ENABLED = Boolean(APP_HOST && PUBLIC_HOST && APP_HOST !== PUBLIC_HOST);
 
-function enforcePublicHostForP(req, res, next) {
-  if (!ENFORCE_PUBLIC_P_HOST) return next();
-  if (!PUBLIC_ORIGIN || !PUBLIC_HOST) return next();
-
-  // Try forwarded host first (reverse proxies), then raw host.
-  const xfHost = firstForwardedHost(req.get('x-forwarded-host'));
+function getEffectiveHost(req) {
   const host = canonicalHost(req.get('host'));
 
-  // In dev, this helps you see why redirects aren’t happening.
-  if (NODE_ENV === 'development') {
-    console.log('[p-host] host=', host, 'xfHost=', xfHost, 'publicHost=', PUBLIC_HOST);
+  // Only trust x-forwarded-host if you explicitly enabled TRUST_PROXY
+  if (TRUST_PROXY) {
+    const xfHost = firstForwardedHost(req.get('x-forwarded-host'));
+    return xfHost || host;
   }
 
-  const seenHost = xfHost || host;
+  return host;
+}
 
-  if (seenHost === PUBLIC_HOST) return next();
+// ✅ Block ALL /api traffic on the public host (defense-in-depth)
+function enforceApiOnAppHost(req, res, next) {
+  if (!HOST_ISOLATION_ENABLED) return next();
+
+  const h = getEffectiveHost(req);
+  if (h === PUBLIC_HOST) {
+    // stealthy: pretend API doesn't exist here
+    return res.status(404).json({ error: 'not_found' });
+  }
+
+  next();
+}
+
+// ✅ Redirect /p/* accessed on the app host over to the public host
+function enforcePublicHostForP(req, res, next) {
+  if (!HOST_ISOLATION_ENABLED) return next();
+  if (!PUBLIC_ORIGIN || !PUBLIC_HOST) return next();
+
+  const h = getEffectiveHost(req);
+  if (h === PUBLIC_HOST) return next();
 
   res.setHeader('Cache-Control', 'no-store');
   return res.redirect(302, `${PUBLIC_ORIGIN}${req.originalUrl}`);
 }
+
 
 const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
@@ -906,31 +924,22 @@ function portalsEmbedHeaders(req, res, next) {
   // Helmet sets this; remove it for iframe content
   res.removeHeader('X-Frame-Options');
 
-  // Configure via env so you can tune without code deploy
   const ancestors = PORTALS_FRAME_ANCESTORS;
   const frameAncestors = ancestors || '*';
 
-  // ✅ Safety: sandbox public overlays so they can’t become “same-origin attackers”
-  // - allow-scripts: overlays can run JS
-  // - allow-forms: ok for basic forms
-  // - NOT allow-same-origin: keeps an opaque origin (blocks storage + same-origin API reads)
-  // - NOT allow-modals: blocks alert/confirm/prompt (optional, but safer + less annoying)
-  const csp = [
-    `frame-ancestors ${frameAncestors}`,
-    `sandbox allow-scripts allow-forms`,
-  ].join('; ') + ';';
+  // ✅ Keep ONLY what we need:
+  // - allow embedding where you want (Unity / Portals / etc.)
+  // - do NOT sandbox the whole document (breaks localStorage/fetch)
+  res.setHeader('Content-Security-Policy', `frame-ancestors ${frameAncestors};`);
 
-  res.setHeader('Content-Security-Policy', csp);
-
-  // ✅ Don’t leak URLs as referrers
+  // ✅ Don’t leak URLs (helps token/referrer hygiene generally)
   res.setHeader('Referrer-Policy', 'no-referrer');
 
-  // Safer default for broad embedding environments (Unity/webviews/etc.)
+  // ✅ Allow cross-site embedding (Unity host is a different site)
   res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
 
   next();
 }
-
 
 async function sendMagicLinkEmail(email, url) {
   // If SendGrid isn't configured, fall back to dev-mode logging
@@ -1378,7 +1387,7 @@ async function restoreFileVersionToLive({ space, spaceSlug, versionId, toPath, u
   };
 }
 
-// Attach req.user + req.session if sid cookie exists
+// Attach req.user + req.session if sid cookie exists (with server-side expiry + allowlist enforcement)
 async function sessionMiddleware(req, res, next) {
   try {
     const sid = req.cookies?.sid || null;
@@ -1388,16 +1397,55 @@ async function sessionMiddleware(req, res, next) {
     const session = sessions.find((s) => s.id === sid);
     if (!session) return next();
 
+    // ✅ Server-side TTL (prevents stolen sid from working forever)
+    const maxDaysRaw = Number(process.env.SESSION_MAX_AGE_DAYS || 30);
+    const maxDays = Number.isFinite(maxDaysRaw) && maxDaysRaw > 0 ? maxDaysRaw : 30;
+    const ttlMs = maxDays * 24 * 60 * 60 * 1000;
+
+    const createdAtMs = Date.parse(session.createdAt);
+    const expired =
+      !Number.isFinite(createdAtMs) || Date.now() - createdAtMs > ttlMs;
+
+    // helper: revoke session + clear cookie
+    const revoke = async () => {
+      const nextSessions = sessions.filter((s) => s.id !== sid);
+      if (nextSessions.length !== sessions.length) {
+        await saveSessionsMeta(nextSessions);
+      }
+      res.clearCookie('sid', {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: IS_PROD,
+      });
+    };
+
+    if (expired) {
+      await revoke();
+      return next();
+    }
+
     const users = await loadUsersMeta();
     const user = users.find((u) => u.id === session.userId);
-    if (!user) return next();
+    if (!user) {
+      await revoke();
+      return next();
+    }
+
+    // ✅ Enforce allowlist on every request (revocation works immediately)
+    const approved = await isEmailApproved(user.email);
+    const status = String(user.status || 'active').toLowerCase();
+
+    if (!approved || status !== 'active') {
+      await revoke();
+      return next();
+    }
 
     req.session = session;
     req.user = user;
-    next();
+    return next();
   } catch (err) {
     console.error('[session] error loading session', err);
-    next();
+    return next();
   }
 }
 
@@ -1513,6 +1561,7 @@ const ALLOWED_ORIGINS = Array.from(EDITOR_ORIGINS);
 
 app.use(
   '/api',
+  enforceApiOnAppHost,
   cors({
     origin(origin, cb) {
       // Allow non-browser / same-origin calls (curl, health checks, etc.)
@@ -1523,8 +1572,7 @@ app.use(
       }
 
       console.warn('[cors] blocked origin:', origin);
-      // ✅ Don’t throw; just omit CORS headers so the browser can’t read responses
-      return cb(null, false);
+      return cb(new Error('Not allowed by CORS'));
     },
     credentials: true,
   })
