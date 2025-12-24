@@ -187,8 +187,8 @@ function LoginPage() {
           !!s?.user?.emailVerifiedAt; // NOTE: see backend tip below
 
         if (verified) {
-          navigate('/', { replace: true });
-          return;
+        return <Navigate to="/" replace />;
+
         }
 
         // Prefill email from backend if present
@@ -286,118 +286,143 @@ const onDiscord = () => {
   const loggedIn = !!auth?.loggedIn;
   const emailVerified = !!auth?.user?.emailVerifiedAt; // NOTE: see backend tip below
 
-  // Logged out UI
-  if (!loggedIn) {
-    return (
-      <div className="login-shell">
-        <div className="login-card">
-          <h1>Portals iFrame Builder</h1>
+if (!loggedIn) {
+  return (
+   <div className="login-shell">
+      <div className="login-card login-card--with-hero">
+        <div className="login-hero login-hero--gradient">
+          <div className="login-hero-ring" aria-hidden="true" />
+          <div className="login-hero-grain" aria-hidden="true" />
+        </div>
 
-          <p style={{ marginTop: 6, fontSize: 12, color: 'var(--text-muted)' }}>
-            Sign in with Discord. You must be in the guild and have the required role.
+        <div className="login-body">
+          <div className="login-title-row">
+            <h1>Portals iFrame Builder</h1>
+            <div className="login-kicker">For Portals Builders</div>
+          </div>
+
+          <p className="login-subtext">
+            Sign in with Discord. Must be a member of the Portals server with the designated holder role. All concerns must be sent to Professor Quibbly in writing.
           </p>
 
           <button
-            className="button primary"
+            className="button primary login-cta"
             type="button"
             onClick={onDiscord}
             disabled={busy}
-            style={{ marginTop: 14, width: '100%' }}
           >
-            {busy ? 'Checking…' : 'Sign in with Discord'}
+            {busy ? 'Checking…' : 'Continue with Discord'}
           </button>
 
-          <div className="login-status" style={{ marginTop: 10 }}>
-            {status}
+          {!!status && <div className="login-status">{status}</div>}
+
+          <div className="login-fineprint">
+            Tip: if you get blocked, you’re either not in the correct server or missing the required role.
           </div>
         </div>
       </div>
-    );
-  }
+    </div>
+  );
+}
+
 
   // Logged in but NOT verified → onboarding UI
   if (!emailVerified) {
-    return (
-      <div className="login-shell">
-        <div className="login-card">
-          <h1>Verify your email</h1>
+  const dUser = auth?.user || null;
+  const handle = dUser?.discordUsername ? `@${dUser.discordUsername}` : (dUser?.discordId || 'unknown');
 
-          <p style={{ marginTop: 6, fontSize: 12, color: 'var(--text-muted)' }}>
-            You’re signed in with Discord as{' '}
-            <strong>{auth?.user?.discordUsername || auth?.user?.discordId || 'unknown'}</strong>.
-            <br />
-            Before you can enter the builder, verify an email for approvals + updates.
-          </p>
+  const avatarUrl =
+    dUser?.discordAvatarUrl ||
+    (dUser?.discordId && dUser?.discordAvatar
+      ? (() => {
+          const isAnimated = String(dUser.discordAvatar).startsWith('a_');
+          const ext = isAnimated ? 'gif' : 'png';
+          return `https://cdn.discordapp.com/avatars/${encodeURIComponent(dUser.discordId)}/${encodeURIComponent(dUser.discordAvatar)}.${ext}?size=96`;
+        })()
+      : null);
 
-          <div style={{ marginTop: 14 }}>
-            <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'block' }}>
-              Email
-              <input
-                type="email"
-                placeholder="you@example.com"
-                value={email}
-                onChange={(e) => {
-                  setEmail(e.target.value);
-                  if (status) setStatus('');
-                }}
-                autoComplete="email"
-                disabled={busy}
-                style={{ marginTop: 6 }}
-              />
-            </label>
+  const statusClass =
+    status && (status.toLowerCase().includes('failed') || status.toLowerCase().includes('not verified'))
+      ? 'verify-status verify-status--error'
+      : status && status.toLowerCase().includes('sent')
+      ? 'verify-status verify-status--ok'
+      : 'verify-status';
 
-            {!busy && emailTrim && !emailOk && (
-              <div style={{ marginTop: 6, fontSize: 12, color: '#f97373' }}>
-                Please enter a valid email.
-              </div>
-            )}
+  return (
+    <div className="login-shell">
+      <div className="login-card verify-card">
+        <div className="verify-header">
+          {avatarUrl ? (
+            <img className="verify-avatar" src={avatarUrl} alt="" referrerPolicy="no-referrer" />
+          ) : (
+            <span className="verify-avatar--fallback" aria-hidden="true">
+              {(handle?.[0] || '•').toUpperCase()}
+            </span>
+          )}
 
-            <button
-              className="button primary"
-              type="button"
-              onClick={onSendVerify}
-              disabled={busy || !emailOk}
-              style={{ marginTop: 10, width: '100%' }}
-            >
-              {busy ? 'Working…' : 'Send verification email'}
-            </button>
-
-            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-              <button
-                className="button small"
-                type="button"
-                onClick={onResend}
-                disabled={busy}
-                style={{ flex: 1 }}
-              >
-                Resend
-              </button>
-              <button
-                className="button small"
-                type="button"
-                onClick={onIveVerified}
-                disabled={busy}
-                style={{ flex: 1 }}
-              >
-                I’ve verified — continue
-              </button>
-            </div>
-
-            <div className="login-status" style={{ marginTop: 10 }}>
-              {status}
+          <div style={{ minWidth: 0 }}>
+            <h1 className="verify-title">Verify your email</h1>
+            <div className="verify-subtitle">
+              Signed in as <strong>{handle}</strong>. Verify an email to unlock the builder.
             </div>
           </div>
         </div>
+
+        <div className="verify-field">
+          <div className="verify-label">Email</div>
+          <input
+            type="email"
+            placeholder="you@example.com"
+            value={email}
+            onChange={(e) => {
+              setEmail(e.target.value);
+              if (status) setStatus('');
+            }}
+            autoComplete="email"
+            disabled={busy}
+          />
+
+          {!busy && emailTrim && !emailOk && (
+            <div className="verify-status verify-status--error">
+              Please enter a valid email.
+            </div>
+          )}
+        </div>
+
+        <div className="verify-actions">
+          <button
+            className="button primary"
+            type="button"
+            onClick={onSendVerify}
+            disabled={busy || !emailOk}
+            style={{ width: '100%' }}
+          >
+            {busy ? 'Working…' : 'Send verification email'}
+          </button>
+
+          <div className="verify-actions-secondary">
+            <button className="button small" type="button" onClick={onResend} disabled={busy}>
+              Resend
+            </button>
+            <button className="button small" type="button" onClick={onIveVerified} disabled={busy}>
+              I’ve verified — continue
+            </button>
+          </div>
+
+          <div className={statusClass}>{status}</div>
+        </div>
       </div>
-    );
-  }
+    </div>
+  );
+}
+
 
   // Verified but still here (rare) → send them in
   navigate('/', { replace: true });
   return null;
 }
 
-function LayoutShell({ me, usage, onLogout, children }) {
+function LayoutShell({ me, onLogout, children }) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
 
@@ -436,6 +461,17 @@ function LayoutShell({ me, usage, onLogout, children }) {
   // Local mirrors so modal reflects actions immediately
   const [pendingEmailLocal, setPendingEmailLocal] = useState(null);
   const [emailVerifiedAtLocal, setEmailVerifiedAtLocal] = useState(null);
+
+  useEffect(() => {
+  if (!profileOpen) return;
+
+  const onKey = (e) => {
+    if (e.key === 'Escape') setProfileOpen(false);
+  };
+
+  document.addEventListener('keydown', onKey);
+  return () => document.removeEventListener('keydown', onKey);
+}, [profileOpen]);
 
   // Sync inputs when profile opens
   useEffect(() => {
@@ -762,32 +798,6 @@ function LayoutShell({ me, usage, onLogout, children }) {
                     )}
                   </div>
                 </div>
-              </div>
-
-              {/* Support packet */}
-              <div className="profile-footer">
-                <button
-                  type="button"
-                  className="button small"
-                  onClick={async () => {
-                    const packet = {
-                      userId: me?.user?.id || null,
-                      discordId,
-                      discordUsername,
-                      email: email || null,
-                      emailVerifiedAt: (emailVerifiedAtLocal || emailVerifiedAt) || null,
-                      pendingEmail: pendingEmailLocal || pendingEmail || null,
-                    };
-                    const text = JSON.stringify(packet, null, 2);
-                    try {
-                      await navigator.clipboard.writeText(text);
-                    } catch {
-                      window.prompt('Copy support packet:', text);
-                    }
-                  }}
-                >
-                  Copy support packet
-                </button>
               </div>
             </div>
           </div>
@@ -3153,7 +3163,7 @@ const handleRequestWorkspace = async () => {
   const hasPending = pendingRequest?.status === 'pending';
 
   return (
-    <LayoutShell me={me} usage={usage} onLogout={handleLogout}>
+    <LayoutShell me={me} onLogout={handleLogout}>
       <Sidebar
         spaces={spaces}
         activeSlug={activeSlug}
