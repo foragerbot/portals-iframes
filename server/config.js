@@ -39,6 +39,7 @@ export const PORT = Number(process.env.PORT || 4100);
 // Set LISTEN_HOST=0.0.0.0 if you intentionally want to expose it.
 export const LISTEN_HOST = process.env.LISTEN_HOST || '127.0.0.1';
 
+// Legacy (keep for now; not used by Discord-admin flow)
 export const ADMIN_TOKEN = process.env.ADMIN_TOKEN || null;
 
 // Optional: allow multiple pending workspace requests per user
@@ -144,6 +145,10 @@ export const DISCORD_REQUIRED_ROLE_IDS = (process.env.DISCORD_REQUIRED_ROLE_IDS 
   .map((s) => s.trim())
   .filter(Boolean);
 
-  export const EMAIL_VERIFY_TOKENS_META_PATH = path.join(ROOT_DIR, 'emailVerifyTokens.meta.json');
+export const EMAIL_VERIFY_TOKENS_META_PATH = path.join(ROOT_DIR, 'emailVerifyTokens.meta.json');
 export const EMAIL_VERIFY_TOKEN_TTL_HOURS = Number(process.env.EMAIL_VERIFY_TOKEN_TTL_HOURS || 48);
 
+export const ADMIN_DISCORD_IDS = (process.env.ADMIN_DISCORD_IDS || '')
+  .split(',')
+  .map((s) => String(s || '').trim())
+  .filter(Boolean);

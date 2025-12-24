@@ -227,52 +227,23 @@ export function needsEmailForWorkspaceRequest(meResponse) {
 
 /** ───────────────── Admin ───────────────── */
 
-export function adminGetSpaceRequests(adminToken, status = 'pending') {
+export function adminGetSpaceRequests(status = 'pending') {
   const params = new URLSearchParams();
   if (status) params.set('status', status);
-  return request(`/api/admin/space-requests?${params.toString()}`, {
-    method: 'GET',
-    headers: { 'x-admin-token': adminToken },
-  });
+  return request(`/api/admin/space-requests?${params.toString()}`, { method: 'GET' });
 }
 
-export function adminApproveSpaceRequest(adminToken, id, { slug, quotaMb, billing } = {}) {
+export function adminApproveSpaceRequest(id, { slug, quotaMb, billing } = {}) {
   return request(`/api/admin/space-requests/${encodeURIComponent(id)}/approve`, {
     method: 'POST',
-    headers: { 'x-admin-token': adminToken },
     body: JSON.stringify({ slug, quotaMb, ...(billing ? { billing } : {}) }),
   });
 }
 
-export function adminRejectSpaceRequest(adminToken, id, reason) {
+export function adminRejectSpaceRequest(id, reason) {
   return request(`/api/admin/space-requests/${encodeURIComponent(id)}/reject`, {
     method: 'POST',
-    headers: { 'x-admin-token': adminToken },
     body: JSON.stringify({ reason }),
-  });
-}
-
-// (Optional legacy allowlist admin endpoints — keep only if you still want that panel)
-export function adminGetApprovedUsers(adminToken) {
-  return request('/api/admin/approved-users', {
-    method: 'GET',
-    headers: { 'x-admin-token': adminToken },
-  });
-}
-
-export function adminAddApprovedUser(adminToken, email) {
-  return request('/api/admin/approved-users', {
-    method: 'POST',
-    headers: { 'x-admin-token': adminToken },
-    body: JSON.stringify({ email }),
-  });
-}
-
-export function adminRemoveApprovedUser(adminToken, email) {
-  return request('/api/admin/approved-users', {
-    method: 'DELETE',
-    headers: { 'x-admin-token': adminToken },
-    body: JSON.stringify({ email }),
   });
 }
 
@@ -287,5 +258,39 @@ export function startEmailVerification(email) {
 export function resendEmailVerification() {
   return request('/api/user/email/resend', {
     method: 'POST',
+  });
+}
+
+// Create a space (supports ownerUserId)
+export function adminCreateSpace({ slug, quotaMb = 50, ownerEmail = null, ownerUserId = null } = {}) {
+  return request('/api/admin/spaces', {
+    method: 'POST',
+    body: JSON.stringify({
+      slug,
+      quotaMb,
+      ...(ownerEmail ? { ownerEmail } : {}),
+      ...(ownerUserId ? { ownerUserId } : {}),
+    }),
+  });
+}
+
+// Search users for pickers
+export function adminSearchUsers(q, limit = 25) {
+  const params = new URLSearchParams();
+  if (q != null) params.set('q', String(q));
+  params.set('limit', String(limit));
+  return request(`/api/admin/users/search?${params.toString()}`, { method: 'GET' });
+}
+
+// Send email to userId
+export function adminSendUserEmail(userId, { subject, text = '', html = '', from = null } = {}) {
+  return request(`/api/admin/users/${encodeURIComponent(userId)}/email`, {
+    method: 'POST',
+    body: JSON.stringify({
+      subject,
+      ...(text ? { text } : {}),
+      ...(html ? { html } : {}),
+      ...(from ? { from } : {}),
+    }),
   });
 }

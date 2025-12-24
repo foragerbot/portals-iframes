@@ -1224,6 +1224,12 @@ body {
   min-height: 16px;
 }
 
+.login-status--error {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+
 .login-fineprint {
   margin-top: 2px;
   font-size: 11px;
@@ -1923,6 +1929,43 @@ body {
   background: var(--accent-secondary);
 }
 
+.admin-shell {
+  min-height: 100vh;
+  width: 100%;
+  background: var(--bg-elevated);
+  padding: 0;
+}
+
+.admin-page {
+  height: 100vh;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.admin-header {
+  padding: 16px 18px 10px;
+}
+
+.admin-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 18px 18px;
+}
+
+.admin-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+@media (max-width: 900px) {
+  .admin-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ────────────────────────────────────────────
    Responsive
    ──────────────────────────────────────────── */
@@ -1955,3 +1998,4 @@ body {
     max-width: 100%;
   }
 }
+

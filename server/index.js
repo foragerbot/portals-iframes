@@ -1567,6 +1567,13 @@ app.get('/api/auth/discord/start', (req, res) => {
 // /api/auth/discord/callback
 app.get('/api/auth/discord/callback', async (req, res, next) => {
   res.setHeader('Cache-Control', 'no-store');
+
+  const appBase = String(APP_BASE_URL || '').replace(/\/+$/, '');
+  const bounce = (code) => {
+    if (!appBase) return res.status(500).json({ error: 'misconfigured', message: 'APP_BASE_URL is not set' });
+    return res.redirect(302, `${appBase}/login?error=${encodeURIComponent(code)}`);
+  };
+
   try {
     const code = String(req.query?.code || '');
     const state = String(req.query?.state || '');
@@ -1580,12 +1587,12 @@ app.get('/api/auth/discord/callback', async (req, res, next) => {
     });
 
     if (!DISCORD_CLIENT_ID || !DISCORD_CLIENT_SECRET || !DISCORD_REDIRECT_URI) {
-      return res.status(503).json({ error: 'discord_auth_disabled' });
+      return bounce('discord_auth_disabled');
     }
 
-    if (!code) return res.status(400).json({ error: 'missing_code' });
+    if (!code) return bounce('missing_code');
     if (!state || !expected || state !== expected) {
-      return res.status(400).json({ error: 'bad_state' });
+      return bounce('bad_state');
     }
 
     // Exchange code -> access token, then fetch /users/@me
@@ -1593,29 +1600,16 @@ app.get('/api/auth/discord/callback', async (req, res, next) => {
     const me = await fetchDiscordMe(token.access_token);
 
     const discordId = String(me.id || '');
-    if (!discordId) return res.status(400).json({ error: 'discord_no_id' });
+    if (!discordId) return bounce('discord_no_id');
 
     // ✅ REQUIRED: guild membership + required role gate
     const member = await fetchDiscordGuildMember(discordId);
-    if (!member) return res.status(403).json({ error: 'not_in_guild' });
-    if (!hasRequiredRole(member)) return res.status(403).json({ error: 'missing_required_role' });
+    if (!member) return bounce('not_in_guild');
+    if (!hasRequiredRole(member)) return bounce('missing_required_role');
 
-    // ✅ Discord-provided email (we use it as the default "unverified" email)
+    // Optional email from Discord (may be null depending on scopes/user)
     const discordEmail = String(me.email || '').trim().toLowerCase();
     const discordEmailOk = !!discordEmail && isValidEmail(discordEmail);
-
-    // Guarantee: user docs never have email=null
-    // If Discord didn't provide email, we can't satisfy the invariant.
-    if (!discordEmailOk) {
-      const appBase = String(APP_BASE_URL || '').replace(/\/+$/, '');
-      if (appBase) {
-        return res.redirect(302, `${appBase}/login?error=discord_email_missing`);
-      }
-      return res.status(403).json({
-        error: 'discord_email_missing',
-        message: 'Discord did not provide an email address. Enable the email scope and try again.',
-      });
-    }
 
     // Build a stable avatar URL for UI
     const avatarHash = me.avatar ? String(me.avatar) : '';
@@ -1625,6 +1619,7 @@ app.get('/api/auth/discord/callback', async (req, res, next) => {
       ? `https://cdn.discordapp.com/avatars/${encodeURIComponent(discordId)}/${encodeURIComponent(avatarHash)}.${avatarExt}?size=128`
       : null;
 
+    // Create or update user (Discord-first identity)
     const users = await loadUsersMeta();
     let user = users.find((u) => u && String(u.discordId || '') === discordId) || null;
 
@@ -1636,17 +1631,14 @@ app.get('/api/auth/discord/callback', async (req, res, next) => {
         roles: ['user'],
         createdAt: nowIso,
 
-        // ✅ Always set a default email immediately (UNVERIFIED in our system)
-        email: discordEmail,
+        email: null,
         emailVerifiedAt: null,
-
         pendingEmail: null,
         pendingEmailSetAt: null,
       };
       users.push(user);
     }
 
-    // Update Discord profile fields
     user.discordId = discordId;
     user.discordUsername = me.username || null;
     user.discordGlobalName = me.global_name || null;
@@ -1654,28 +1646,20 @@ app.get('/api/auth/discord/callback', async (req, res, next) => {
     user.discordAvatarUrl = discordAvatarUrl;
     user.lastLoginAt = nowIso;
 
-    // Role snapshot
     user.discordGuildId = DISCORD_GUILD_ID || null;
     user.discordRoleIds = Array.isArray(member.roles) ? member.roles : [];
 
-    // Billing/defaults
     user.billing = user.billing || {};
     user.status = user.status || 'active';
     user.updatedAt = nowIso;
 
-    // ✅ Invariant: user.email must always exist.
-    // - If they have a VERIFIED email already, keep it (do not overwrite).
-    // - If NOT verified, ensure user.email is set (defaults to Discord email).
-    const currentEmail = String(user.email || '').trim().toLowerCase();
     const hasVerifiedEmail =
-      !!user.emailVerifiedAt && isValidEmail(currentEmail);
+      !!user.emailVerifiedAt &&
+      isValidEmail(String(user.email || '').trim().toLowerCase());
 
-    if (!hasVerifiedEmail) {
-      if (!currentEmail || !isValidEmail(currentEmail)) {
-        user.email = discordEmail;
-      }
-      // keep unverified until they click verify link
-      user.emailVerifiedAt = null;
+    if (!hasVerifiedEmail && discordEmailOk) {
+      user.pendingEmail = discordEmail;
+      user.pendingEmailSetAt = user.pendingEmailSetAt || nowIso;
     }
 
     await saveUsersMeta(users);
@@ -1687,7 +1671,7 @@ app.get('/api/auth/discord/callback', async (req, res, next) => {
     sessions.push({
       id: sid,
       userId: user.id,
-      email: String(user.email || '').trim().toLowerCase() || null,
+      email: user.email || null,
       createdAt: nowIso,
       userAgent: req.get('user-agent') || null,
       ip: req.ip || null,
@@ -1701,23 +1685,21 @@ app.get('/api/auth/discord/callback', async (req, res, next) => {
       maxAge: 1000 * 60 * 60 * 24 * 30,
     });
 
-    // Redirect into email-verify gate UI
-    const appBase = String(APP_BASE_URL || '').replace(/\/+$/, '');
     if (!appBase) {
       return res.status(500).json({ error: 'misconfigured', message: 'APP_BASE_URL is not set' });
     }
 
-    // If already verified, go straight in.
     if (hasVerifiedEmail) {
       return res.redirect(302, `${appBase}/`);
     }
 
-    // Otherwise, go to the verify screen (your LoginPage shows this)
-    return res.redirect(302, `${appBase}/login?step=verify`);
+    return res.redirect(302, `${appBase}/login?step=onboarding`);
   } catch (err) {
-    next(err);
+    console.error('[discord] callback failed', err);
+    return bounce('discord_oauth_failed');
   }
 });
+
 
 
 /**
@@ -1925,27 +1907,10 @@ async function sessionMiddleware(req, res, next) {
       await revoke('user_missing');
       return next();
     }
-// ✅ Allow sessions for Discord-authenticated users during onboarding,
-// even if they haven't verified an email yet.
-// We'll gate sensitive actions with requireVerifiedEmail instead.
-const email = String(user.email || '').trim().toLowerCase();
-const pendingEmail = String(user.pendingEmail || '').trim().toLowerCase();
 
-// If they have *some* email value (current or pending), it must be valid.
-// But it's OK for user.email to be empty during onboarding.
-if (email && !isValidEmail(email)) {
-  await revoke('bad_email');
-  return next();
-}
-if (pendingEmail && !isValidEmail(pendingEmail)) {
-  await revoke('bad_pending_email');
-  return next();
-}
-
-// Optional: if you want to require Discord identity to keep a session when email is missing:
-const hasDiscord = !!String(user.discordId || '').trim();
-if (!hasDiscord && !email) {
-  await revoke('missing_identity');
+    const emailCandidate = String(user.email || user.pendingEmail || '').trim().toLowerCase();
+if (!emailCandidate || !isValidEmail(emailCandidate)) {
+  await revoke('missing_email');
   return next();
 }
 
@@ -1998,6 +1963,27 @@ function requireUser(req, res, next) {
       .status(401)
       .json({ error: 'not_logged_in', message: 'No active session' });
   }
+  next();
+}
+
+import { ADMIN_DISCORD_IDS } from './config.js';
+
+function isAdminDiscordId(discordId) {
+  const id = String(discordId || '').trim();
+  if (!id) return false;
+  return Array.isArray(ADMIN_DISCORD_IDS) && ADMIN_DISCORD_IDS.includes(id);
+}
+
+function requireAdminUser(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'not_logged_in' });
+
+  const discordId = String(req.user?.discordId || '').trim();
+  if (!discordId) return res.status(403).json({ error: 'forbidden' });
+
+  // ADMIN_DISCORD_IDS must be an array of strings
+  const ok = Array.isArray(ADMIN_DISCORD_IDS) && ADMIN_DISCORD_IDS.includes(discordId);
+  if (!ok) return res.status(403).json({ error: 'forbidden' });
+
   next();
 }
 
@@ -2267,7 +2253,6 @@ app.post('/api/auth/logout', async (req, res, next) => {
   }
 });
 
-
 // Current user: GET /api/me
 app.get('/api/me', async (req, res, next) => {
   try {
@@ -2315,7 +2300,6 @@ app.get('/api/me', async (req, res, next) => {
     next(err);
   }
 });
-
 
 // POST /api/user/email/start
 // body: { email }
@@ -3322,8 +3306,6 @@ if (fileContext) {
     }
   }
 );
-// ───────────────── GPT helper for a user space ─────────────────
-
 
 // ───────────────── Asset upload for a user space ─────────────────
 
@@ -3332,9 +3314,8 @@ if (fileContext) {
 // fields:
 //   files[]  -> file inputs
 //   subdir   -> optional subdirectory inside the space (e.g. "assets" or "assets/icons")
-app.post(
-  '/api/spaces/:slug/upload',
-  requireUser, requireEditorOrigin,
+app.post('/api/spaces/:slug/upload', 
+  requireUser, requireEditorOrigin, 
   upload.array('files', MAX_ASSET_FILES),
   async (req, res, next) => {
     try {
@@ -3680,27 +3661,47 @@ app.post('/api/spaces/request', requireUser, requireEditorOrigin, requireVerifie
 });
 
 
+
 // Create a new space: POST /api/admin/spaces
-// Body: { slug, quotaMb?, ownerEmail? }
-app.post('/api/admin/spaces', requireAdmin, async (req, res, next) => {
+// Body: { slug, quotaMb?, ownerEmail?, ownerUserId? }
+app.post('/api/admin/spaces', requireUser, requireAdminUser, requireEditorOrigin, async (req, res, next) => {
   try {
     await ensureSpacesRoot();
 
-    const { slug, quotaMb, ownerEmail } = req.body || {};
+    const { slug, quotaMb, ownerEmail, ownerUserId } = req.body || {};
 
     if (!isValidSlug(slug)) {
-      console.log('[admin] invalid slug:', slug);
       return res.status(400).json({
         error: 'bad_slug',
         message: 'Slug must be 3-32 chars of lowercase letters, digits, or hyphens.',
       });
     }
 
-    // ✅ Email stays optional for admin-created spaces, but if provided it must be valid.
-    let normalizedOwnerEmail = null;
-    let ownerUserId = null;
+    const users = await loadUsersMeta();
 
-    if (ownerEmail != null && String(ownerEmail).trim() !== '') {
+    // Optional owner binding:
+    // - If ownerUserId provided: bind to that user (preferred)
+    // - Else if ownerEmail provided: bind by email (legacy)
+    let resolvedOwnerUserId = null;
+    let resolvedOwnerEmail = null;
+
+    if (ownerUserId && String(ownerUserId).trim()) {
+      const uid = String(ownerUserId).trim();
+      const u = users.find((x) => x && x.id === uid) || null;
+      if (!u) {
+        return res.status(400).json({
+          error: 'bad_owner_user',
+          message: 'ownerUserId does not match any user.',
+        });
+      }
+
+      resolvedOwnerUserId = u.id;
+
+      // If user has a verified email, store it; otherwise leave ownerEmail null
+const em = String(u.email || '').trim().toLowerCase();
+const isVerified = !!u.emailVerifiedAt;
+resolvedOwnerEmail = (isVerified && em && isValidEmail(em)) ? em : null;
+    } else if (ownerEmail != null && String(ownerEmail).trim() !== '') {
       const raw = String(ownerEmail).trim().toLowerCase();
       if (!isValidEmail(raw)) {
         return res.status(400).json({
@@ -3709,27 +3710,22 @@ app.post('/api/admin/spaces', requireAdmin, async (req, res, next) => {
         });
       }
 
-      normalizedOwnerEmail = raw;
+      resolvedOwnerEmail = raw;
 
       // Resolve owner user by email (best-effort)
-      const users = await loadUsersMeta();
-      const u = users.find((x) => (x.email || '').trim().toLowerCase() === normalizedOwnerEmail);
-      ownerUserId = u ? u.id : null;
+      const u = users.find((x) => String(x?.email || '').trim().toLowerCase() === resolvedOwnerEmail) || null;
+      resolvedOwnerUserId = u ? u.id : null;
     }
 
     const spaces = await loadSpacesMeta();
     if (spaces.find((s) => s.slug === slug)) {
-      console.log('[admin] slug already exists:', slug);
       return res.status(409).json({ error: 'space_exists', slug, message: 'slug already in use' });
     }
 
     const nowIso = new Date().toISOString();
     const dirPath = path.join(SPACES_ROOT, slug);
 
-    console.log('[admin] creating dir:', dirPath);
-
     if (fsSync.existsSync(dirPath)) {
-      console.log('[admin] directory already exists on disk for slug:', slug);
       return res.status(409).json({
         error: 'dir_exists',
         slug,
@@ -3791,31 +3787,26 @@ app.post('/api/admin/spaces', requireAdmin, async (req, res, next) => {
 </body>
 </html>
 `;
-
     await fs.writeFile(path.join(dirPath, 'index.html'), starterHtml, 'utf8');
 
     const spaceRecord = {
-      id: slug, // for now, id === slug
+      id: slug,
       slug,
       dirPath,
       quotaMb: Number.isFinite(Number(quotaMb)) ? Number(quotaMb) : 100,
       createdAt: nowIso,
       updatedAt: nowIso,
       status: 'active',
-
-      // Link space to a user if we can
-      ownerEmail: normalizedOwnerEmail,
-      ownerUserId,
+      ownerEmail: resolvedOwnerEmail,
+      ownerUserId: resolvedOwnerUserId,
     };
 
     spaces.push(spaceRecord);
     await saveSpacesMeta(spaces);
 
-    console.log('[admin] space created:', spaceRecord);
-
+    res.setHeader('Cache-Control', 'no-store');
     return res.status(201).json({ ok: true, space: spaceRecord });
   } catch (err) {
-    console.error('[admin] error creating space:', err);
     next(err);
   }
 });
@@ -3824,7 +3815,7 @@ app.post('/api/admin/spaces', requireAdmin, async (req, res, next) => {
 // Admin: approve a workspace request and create a space for the user
 // POST /api/admin/space-requests/:id/approve
 // body: { slug, quotaMb? }
-app.post('/api/admin/space-requests/:id/approve', requireAdmin, requireEditorOrigin, async (req, res, next) => {
+app.post('/api/admin/space-requests/:id/approve', requireUser, requireAdminUser, requireEditorOrigin, async (req, res, next) => {
   try {
     const { id } = req.params;
     const rawSlug = (req.body?.slug || '').toString();
@@ -3861,7 +3852,12 @@ app.post('/api/admin/space-requests/:id/approve', requireAdmin, requireEditorOri
     }
 
     const users = await loadUsersMeta();
-    const user = users.find((u) => u.id === reqRecord.userId || u.email === reqRecord.email);
+    const normReqEmail = String(reqRecord.email || '').trim().toLowerCase();
+const user =
+  users.find((u) => u && u.id === reqRecord.userId) ||
+  users.find((u) => u && String(u.email || '').trim().toLowerCase() === normReqEmail) ||
+  users.find((u) => u && String(u.pendingEmail || '').trim().toLowerCase() === normReqEmail) ||
+  null;
     if (!user) {
       return res.status(404).json({
         error: 'user_not_found',
@@ -3975,7 +3971,7 @@ await saveUsersMeta(users);
 
 // Admin: list workspace requests
 // GET /api/admin/space-requests?status=pending|approved|rejected|all
-app.get('/api/admin/space-requests', requireAdmin, async (req, res, next) => {
+app.get('/api/admin/space-requests', requireUser, requireAdminUser, async (req, res, next) => {
   try {
     const statusRaw = String(req.query?.status || 'pending').trim().toLowerCase();
 
@@ -4007,94 +4003,97 @@ app.get('/api/admin/space-requests', requireAdmin, async (req, res, next) => {
   }
 });
 
-// ───────────────── Admin: Approved emails allowlist ─────────────────
-// Used by client/src/api.js:
-//  - GET    /api/admin/approved-users
-//  - POST   /api/admin/approved-users   body: { email }
-//  - DELETE /api/admin/approved-users   body: { email }
-
-app.get('/api/admin/approved-users', requireAdmin, async (req, res, next) => {
+// Admin: search users (for creating spaces + emailing)
+// GET /api/admin/users/search?q=...&limit=...
+app.get('/api/admin/users/search', requireUser, requireAdminUser, async (req, res, next) => {
   try {
-    const users = await loadApprovedUsers();
-    const sorted = (users || [])
-      .filter(Boolean)
-      .sort((a, b) => {
-        const ta = Date.parse(a?.createdAt || '') || 0;
-        const tb = Date.parse(b?.createdAt || '') || 0;
+    const qRaw = String(req.query?.q || '').trim().toLowerCase();
+    const limitRaw = Number(req.query?.limit || 25);
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(100, limitRaw)) : 25;
+
+    const users = await loadUsersMeta();
+    const arr = Array.isArray(users) ? users.filter(Boolean) : [];
+
+    const hayFor = (u) => {
+      const parts = [
+        u.id,
+        u.email,
+        u.pendingEmail,
+        u.discordId,
+        u.discordUsername,
+        u.discordGlobalName,
+      ].filter(Boolean);
+      return parts.join(' ').toLowerCase();
+    };
+
+    let matches = arr;
+
+    if (qRaw) {
+      matches = arr.filter((u) => hayFor(u).includes(qRaw));
+      // simple scoring: startsWith on username/globalName/id first
+      matches.sort((a, b) => {
+        const aU = String(a.discordUsername || '').toLowerCase();
+        const bU = String(b.discordUsername || '').toLowerCase();
+        const aG = String(a.discordGlobalName || '').toLowerCase();
+        const bG = String(b.discordGlobalName || '').toLowerCase();
+        const aId = String(a.id || '').toLowerCase();
+        const bId = String(b.id || '').toLowerCase();
+
+        const score = (u, U, G, Id) => {
+          let s = 0;
+          if (U && U.startsWith(qRaw)) s += 6;
+          if (G && G.startsWith(qRaw)) s += 5;
+          if (Id && Id.startsWith(qRaw)) s += 4;
+          if (String(u.discordId || '').toLowerCase().startsWith(qRaw)) s += 3;
+          if (String(u.email || '').toLowerCase().startsWith(qRaw)) s += 2;
+          if (String(u.pendingEmail || '').toLowerCase().startsWith(qRaw)) s += 2;
+          return s;
+        };
+
+        const sa = score(a, aU, aG, aId);
+        const sb = score(b, bU, bG, bId);
+        if (sb !== sa) return sb - sa;
+
+        // newest login-ish first
+        const ta = Date.parse(a.lastLoginAt || a.updatedAt || a.createdAt || '') || 0;
+        const tb = Date.parse(b.lastLoginAt || b.updatedAt || b.createdAt || '') || 0;
         return tb - ta;
       });
+    } else {
+      // empty query: most recent first
+      matches.sort((a, b) => {
+        const ta = Date.parse(a.lastLoginAt || a.updatedAt || a.createdAt || '') || 0;
+        const tb = Date.parse(b.lastLoginAt || b.updatedAt || b.createdAt || '') || 0;
+        return tb - ta;
+      });
+    }
+
+    const out = matches.slice(0, limit).map((u) => ({
+      id: u.id,
+      discordId: u.discordId || null,
+      discordUsername: u.discordUsername || null,
+      discordGlobalName: u.discordGlobalName || null,
+      discordAvatarUrl: u.discordAvatarUrl || null,
+      email: u.email || null,
+      pendingEmail: u.pendingEmail || null,
+      emailVerifiedAt: u.emailVerifiedAt || null,
+      status: u.status || 'active',
+      lastLoginAt: u.lastLoginAt || null,
+      createdAt: u.createdAt || null,
+    }));
 
     res.setHeader('Cache-Control', 'no-store');
-    return res.json({ ok: true, users: sorted });
+    return res.json({ ok: true, q: qRaw, users: out });
   } catch (err) {
     next(err);
   }
 });
 
-app.post('/api/admin/approved-users', requireAdmin, requireEditorOrigin, async (req, res, next) => {
-  try {
-    const emailRaw = String(req.body?.email || '').trim().toLowerCase();
-    if (!emailRaw || !isValidEmail(emailRaw)) {
-      return res.status(400).json({ error: 'bad_email', message: 'Provide a valid email.' });
-    }
 
-    const list = await loadApprovedUsers();
-    const normalized = emailRaw;
-
-    const exists = (list || []).some(
-      (u) => String(u?.email || '').trim().toLowerCase() === normalized
-    );
-
-    if (exists) {
-      // idempotent
-      res.setHeader('Cache-Control', 'no-store');
-      return res.json({ ok: true, alreadyExists: true });
-    }
-
-    const nowIso = new Date().toISOString();
-    const nextList = [
-      ...(list || []),
-      { email: normalized, createdAt: nowIso },
-    ];
-
-    await saveApprovedUsers(nextList);
-
-    res.setHeader('Cache-Control', 'no-store');
-    return res.status(201).json({ ok: true, user: { email: normalized, createdAt: nowIso } });
-  } catch (err) {
-    next(err);
-  }
-});
-
-app.delete('/api/admin/approved-users', requireAdmin, requireEditorOrigin, async (req, res, next) => {
-  try {
-    const emailRaw = String(req.body?.email || '').trim().toLowerCase();
-    if (!emailRaw || !isValidEmail(emailRaw)) {
-      return res.status(400).json({ error: 'bad_email', message: 'Provide a valid email.' });
-    }
-
-    const list = await loadApprovedUsers();
-    const normalized = emailRaw;
-
-    const before = (list || []).length;
-    const nextList = (list || []).filter(
-      (u) => String(u?.email || '').trim().toLowerCase() !== normalized
-    );
-
-    await saveApprovedUsers(nextList);
-
-    res.setHeader('Cache-Control', 'no-store');
-    return res.json({ ok: true, removed: nextList.length !== before });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// Admin-only: send an email to a user by userId
+// Admin-only: send an email to a user by userId (Discord-admin session)
 // POST /api/admin/users/:id/email
-// headers: x-admin-token: <ADMIN_TOKEN>
 // body: { subject: string, text?: string, html?: string, from?: string }
-app.post('/api/admin/users/:id/email', requireAdmin, async (req, res, next) => {
+app.post('/api/admin/users/:id/email', requireUser, requireAdminUser, requireEditorOrigin, async (req, res, next) => {
   try {
     if (!SENDGRID_API_KEY || !SENDGRID_FROM) {
       return res.status(503).json({
@@ -4110,12 +4109,9 @@ app.post('/api/admin/users/:id/email', requireAdmin, async (req, res, next) => {
     const text = req.body?.text != null ? String(req.body.text) : '';
     const html = req.body?.html != null ? String(req.body.html) : '';
 
-    // allow overriding "from" if you ever want (optional); default to SENDGRID_FROM
     const from = String(req.body?.from || SENDGRID_FROM).trim();
 
-    if (!subject) {
-      return res.status(400).json({ error: 'missing_subject' });
-    }
+    if (!subject) return res.status(400).json({ error: 'missing_subject' });
     if (!text && !html) {
       return res.status(400).json({
         error: 'missing_body',
@@ -4123,12 +4119,12 @@ app.post('/api/admin/users/:id/email', requireAdmin, async (req, res, next) => {
       });
     }
 
-    // Load user
     const users = await loadUsersMeta();
     const user = users.find((u) => u && u.id === userId) || null;
     if (!user) return res.status(404).json({ error: 'user_not_found' });
 
-    const to = String(user.email || '').trim().toLowerCase();
+    // Prefer verified email; fallback to pending email (lets you message “verify this”)
+    const to = String(user.email || user.pendingEmail || '').trim().toLowerCase();
     if (!to || !isValidEmail(to)) {
       return res.status(400).json({
         error: 'user_missing_email',
@@ -4139,33 +4135,27 @@ app.post('/api/admin/users/:id/email', requireAdmin, async (req, res, next) => {
           discordUsername: user.discordUsername || null,
           discordGlobalName: user.discordGlobalName || null,
           email: user.email || null,
+          pendingEmail: user.pendingEmail || null,
         },
       });
     }
 
-    // Send
-    const msg = {
+    await sgMail.send({
       to,
       from,
       subject,
       ...(text ? { text } : {}),
       ...(html ? { html } : {}),
-    };
-
-    await sgMail.send(msg);
-
-    console.log('[admin-email] sent', {
-      to,
-      userId,
-      subject,
     });
 
+    console.log('[admin-email] sent', { to, userId, subject });
     return res.json({ ok: true, to, userId });
   } catch (err) {
     console.error('[admin-email] failed', err);
     next(err);
   }
 });
+
 
 async function sendWelcomeEmailToUser(user) {
   if (!SENDGRID_API_KEY || !SENDGRID_FROM) {
@@ -4228,7 +4218,7 @@ async function sendWelcomeEmailToUser(user) {
 // body: { reason? }
 //
 // ✅ FIXED: now loads the user and sends a rejection email (best-effort)
-app.post('/api/admin/space-requests/:id/reject', requireAdmin, async (req, res, next) => {
+app.post('/api/admin/space-requests/:id/reject', requireUser, requireAdminUser, requireEditorOrigin, async (req, res, next) => {
   try {
     const { id } = req.params;
     const reason = (req.body?.reason || '').toString().trim();
@@ -4367,6 +4357,56 @@ app.use('/api/auth/status', (req, res, next) => {
     env: NODE_ENV,
   });
   next();
+});
+
+// Admin: search users (for admin UI pickers)
+// GET /api/admin/users?q=...&limit=...
+app.get('/api/admin/users', requireAdmin, async (req, res, next) => {
+  try {
+    const q = String(req.query?.q || '').trim().toLowerCase();
+    const limitRaw = Number(req.query?.limit || 25);
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(100, limitRaw)) : 25;
+
+    const users = await loadUsersMeta();
+
+    const matches = (users || [])
+      .filter(Boolean)
+      .filter((u) => {
+        if (!q) return true;
+        const email = String(u.email || '').toLowerCase();
+        const pending = String(u.pendingEmail || '').toLowerCase();
+        const du = String(u.discordUsername || '').toLowerCase();
+        const dg = String(u.discordGlobalName || '').toLowerCase();
+        const did = String(u.discordId || '').toLowerCase();
+        return (
+          email.includes(q) ||
+          pending.includes(q) ||
+          du.includes(q) ||
+          dg.includes(q) ||
+          did.includes(q)
+        );
+      })
+      .slice(0, limit)
+      .map((u) => ({
+        id: u.id,
+        email: u.email || null,
+        pendingEmail: u.pendingEmail || null,
+        emailVerifiedAt: u.emailVerifiedAt || null,
+        discordId: u.discordId || null,
+        discordUsername: u.discordUsername || null,
+        discordGlobalName: u.discordGlobalName || null,
+        discordAvatar: u.discordAvatar || null,
+        discordAvatarUrl: u.discordAvatarUrl || null,
+        status: u.status || 'active',
+        lastLoginAt: u.lastLoginAt || null,
+        createdAt: u.createdAt || null,
+      }));
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok: true, users: matches });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // Auth status (lightweight)

@@ -1,5 +1,4 @@
 //client/src/App.jsx
-
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { Routes, Route, useNavigate, useLocation, Navigate } from 'react-router-dom';
 import {
@@ -23,11 +22,11 @@ import {
   adminApproveSpaceRequest,
   adminRejectSpaceRequest,
   logout,
-  adminGetApprovedUsers,
-  adminAddApprovedUser,
-  adminRemoveApprovedUser,
   startEmailVerification,
   resendEmailVerification,
+  adminCreateSpace,
+  adminSendUserEmail,
+  adminSearchUsers,
 } from './api.js';
 
 import ReactMarkdown from 'react-markdown';
@@ -80,7 +79,6 @@ function highlightToHtmlSafe(codeText, lang) {
     return escapeHtml(text);
   }
 }
-
 
 const IFRAME_ORIGIN = (() => {
   const raw = import.meta.env.VITE_IFRAME_ORIGIN;
@@ -151,7 +149,7 @@ function useMe() {
 
 function LoginPage() {
   const navigate = useNavigate();
-
+  const [statusIsError, setStatusIsError] = useState(false);
   const [auth, setAuth] = useState(null); // { loggedIn, user, ... }
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('');
@@ -186,10 +184,10 @@ function LoginPage() {
           !!s?.user?.email &&
           !!s?.user?.emailVerifiedAt; // NOTE: see backend tip below
 
-        if (verified) {
-        return <Navigate to="/" replace />;
-
-        }
+   if (verified) {
+  navigate('/', { replace: true });
+  return;
+}
 
         // Prefill email from backend if present
         const backendEmail = String(s?.user?.pendingEmail || s?.user?.email || '').trim().toLowerCase();
@@ -201,8 +199,34 @@ function LoginPage() {
         }
 
         // Nice UX when coming back from verify link
-        const qp = new URLSearchParams(window.location.search || '');
-        if (qp.get('verified') === '1') {
+const qp = new URLSearchParams(window.location.search || '');
+const err = qp.get('error');
+
+if (err) {
+  const msg =
+    err === 'not_in_guild'
+      ? 'Access denied: you are not in the Portals Discord server.'
+      : err === 'missing_required_role'
+      ? 'Access denied: you are missing the required role.'
+      : err === 'discord_auth_disabled'
+      ? 'Discord login is disabled on this server.'
+      : err === 'bad_state'
+      ? 'Login expired. Please try again.'
+      : err === 'discord_oauth_failed'
+      ? 'Discord login failed. Please try again.'
+      : 'Login blocked. Please try again.';
+
+  setStatus(msg);
+  setStatusIsError(true);
+
+  // clean URL (remove ?error=...)
+  qp.delete('error');
+  const nextQs = qp.toString();
+  const nextUrl = nextQs ? `${window.location.pathname}?${nextQs}` : window.location.pathname;
+  window.history.replaceState({}, '', nextUrl);
+}
+
+if (qp.get('verified') === '1') {
           setStatus('Email verified. Entering the app…');
           // refresh again (in case status was cached)
           const s2 = await refreshStatus();
@@ -221,67 +245,83 @@ function LoginPage() {
   }, [navigate, refreshStatus]);
 
 const onDiscord = () => {
+  setStatusIsError(false);
   setBusy(true);
   setStatus('Opening Discord…');
   startDiscordLogin();
 };
 
-  const onSendVerify = async () => {
-    if (!emailOk) {
-      setStatus('Please enter a valid email.');
-      return;
-    }
-    setBusy(true);
-    setStatus('Sending verification email…');
-    try {
-      try {
-        localStorage.setItem('pendingEmail', emailTrim);
-      } catch {}
+const onSendVerify = async () => {
+  if (!emailOk) {
+    setStatusIsError(true);
+    setStatus('Please enter a valid email.');
+    return;
+  }
 
-      await startEmailVerification(emailTrim);
-      setStatus('Check your inbox — click the verification link to continue.');
-      await refreshStatus();
-    } catch (err) {
-      console.error(err);
-      setStatus(err.payload?.message || 'Failed to send verification email.');
-    } finally {
-      setBusy(false);
-    }
-  };
+  setStatusIsError(false);
+  setBusy(true);
+  setStatus('Sending verification email…');
 
-  const onResend = async () => {
-    setBusy(true);
-    setStatus('Resending…');
+  try {
     try {
-      await resendEmailVerification();
-      setStatus('Sent. Check your inbox.');
-    } catch (err) {
-      console.error(err);
-      setStatus(err.payload?.message || 'Failed to resend.');
-    } finally {
-      setBusy(false);
-    }
-  };
+      localStorage.setItem('pendingEmail', emailTrim);
+    } catch {}
 
-  const onIveVerified = async () => {
-    setBusy(true);
-    setStatus('Checking verification…');
-    try {
-      const s = await refreshStatus();
-      const verified = !!s?.loggedIn && !!s?.user?.email && !!s?.user?.emailVerifiedAt;
-      if (verified) {
-        setStatus('Verified. Entering the app…');
-        navigate('/', { replace: true });
-      } else {
-        setStatus('Not verified yet. Open the link in your email, then try again.');
-      }
-    } catch (err) {
-      console.error(err);
-      setStatus('Could not confirm verification. Try again in a moment.');
-    } finally {
-      setBusy(false);
+    await startEmailVerification(emailTrim);
+    setStatus('Check your inbox — click the verification link to continue.');
+    await refreshStatus();
+  } catch (err) {
+    console.error(err);
+    setStatusIsError(true);
+    setStatus(err.payload?.message || 'Failed to send verification email.');
+  } finally {
+    setBusy(false);
+  }
+};
+
+const onResend = async () => {
+  setStatusIsError(false);
+  setBusy(true);
+  setStatus('Resending…');
+
+  try {
+    await resendEmailVerification();
+    setStatus('Sent. Check your inbox.');
+  } catch (err) {
+    console.error(err);
+    setStatusIsError(true);
+    setStatus(err.payload?.message || 'Failed to resend.');
+  } finally {
+    setBusy(false);
+  }
+};
+
+const onIveVerified = async () => {
+  setStatusIsError(false);
+  setBusy(true);
+  setStatus('Checking verification…');
+
+  try {
+    const s = await refreshStatus();
+    const verified = !!s?.loggedIn && !!s?.user?.email && !!s?.user?.emailVerifiedAt;
+
+    if (verified) {
+      setStatusIsError(false);
+      setStatus('Verified. Entering the app…');
+      navigate('/', { replace: true });
+    } else {
+      setStatusIsError(true);
+      setStatus('Not verified yet. Open the link in your email, then try again.');
     }
-  };
+  } catch (err) {
+    console.error(err);
+    setStatusIsError(true);
+    setStatus('Could not confirm verification. Try again in a moment.');
+  } finally {
+    setBusy(false);
+  }
+};
+
 
   const loggedIn = !!auth?.loggedIn;
   const emailVerified = !!auth?.user?.emailVerifiedAt; // NOTE: see backend tip below
@@ -317,7 +357,7 @@ if (!loggedIn) {
           {!!status && <div className="login-status">{status}</div>}
 
           <div className="login-fineprint">
-            Tip: if you get blocked, you’re either not in the correct server or missing the required role.
+            Tip: access the Portals ecosystem at <a href="https://theportal.to">theportal.to</a>!
           </div>
         </div>
       </div>
@@ -3462,149 +3502,162 @@ const handleRequestWorkspace = async () => {
 }
 
 function AdminDashboard() {
-  const [adminToken, setAdminToken] = useState(() => {
-    if (typeof window === 'undefined') return '';
-    return localStorage.getItem('adminToken') || '';
-  });
-  const [requests, setRequests] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const navigate = useNavigate();
+
+  // ---- global status ----
+  const [booting, setBooting] = useState(true);
+  const [forbidden, setForbidden] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+
+  // ---- workspace requests ----
+  const [reqStatusFilter, setReqStatusFilter] = useState('pending'); // pending|approved|rejected|all
+  const [requests, setRequests] = useState([]);
+  const [requestsLoading, setRequestsLoading] = useState(false);
 
   // inline slug editing per request
   const [slugEdits, setSlugEdits] = useState({});   // { [requestId]: currentSlug }
   const [slugErrors, setSlugErrors] = useState({}); // { [requestId]: errorMessage | null }
 
-  // allowlist
-  const [approvedUsers, setApprovedUsers] = useState([]);
-  const [allowlistLoading, setAllowlistLoading] = useState(false);
-  const [allowlistError, setAllowlistError] = useState('');
-  const [newAllowEmail, setNewAllowEmail] = useState('');
+  // ---- user search (shared) ----
+  const [userQuery, setUserQuery] = useState('');
+  const [userResults, setUserResults] = useState([]);
+  const [userSearching, setUserSearching] = useState(false);
 
-  const loadRequests = useCallback(
-    async (token) => {
-      if (!token) {
-        setRequests([]);
-        return;
-      }
-      setLoading(true);
-      setErrorMsg('');
-      try {
-        const data = await adminGetSpaceRequests(token, 'pending');
-        const reqs = data.requests || [];
-        setRequests(reqs);
-        setStatusMsg(`Loaded ${reqs.length || 0} pending request(s).`);
+  // ---- create space ----
+  const [createSlug, setCreateSlug] = useState('');
+  const [createQuotaMb, setCreateQuotaMb] = useState(100);
+  const [createOwnerUser, setCreateOwnerUser] = useState(null); // user object
+  const [creatingSpace, setCreatingSpace] = useState(false);
 
-        // initialize slug inputs for each request
-        setSlugEdits((prev) => {
-          const next = { ...prev };
-          for (const r of reqs) {
-            const base =
-              (r.suggestedSlug && r.suggestedSlug.toLowerCase()) ||
-              ((r.email || '')
-                .split('@')[0]
-                .replace(/[^a-z0-9-]/g, '-') || '');
-            if (!next[r.id]) {
-              next[r.id] = normalizeSlug(base);
-            }
-          }
-          return next;
-        });
+  // ---- send email ----
+  const [emailUser, setEmailUser] = useState(null); // user object
+  const [emailSubject, setEmailSubject] = useState('');
+  const [emailBody, setEmailBody] = useState('');
+  const [emailAsHtml, setEmailAsHtml] = useState(false);
+  const [emailFrom, setEmailFrom] = useState('');
+  const [sendingEmail, setSendingEmail] = useState(false);
 
-        setSlugErrors({});
-      } catch (err) {
-        console.error(err);
-        setErrorMsg(err.payload?.error || 'Failed to load requests.');
-      } finally {
-        setLoading(false);
-      }
-    },
-    []
-  );
+  // ---- helpers ----
+  const setAuthErrorFrom = (err) => {
+    if (err?.status === 401) {
+      navigate('/login', { replace: true, state: { from: '/admin' } });
+      return true;
+    }
+    if (err?.status === 403) {
+      setForbidden(true);
+      return true;
+    }
+    return false;
+  };
 
-  const loadApproved = useCallback(
-    async (token) => {
-      if (!token) {
-        setApprovedUsers([]);
-        return;
-      }
-      setAllowlistLoading(true);
-      setAllowlistError('');
-      try {
-        const data = await adminGetApprovedUsers(token);
-        setApprovedUsers(data.users || []);
-      } catch (err) {
-        console.error(err);
-        setAllowlistError(err.payload?.message || 'Failed to load allowlist.');
-      } finally {
-        setAllowlistLoading(false);
-      }
-    },
-    []
-  );
+  const bestHandle = (u) => {
+    if (!u) return '';
+    if (u.discordUsername) return `@${u.discordUsername}`;
+    if (u.discordGlobalName) return String(u.discordGlobalName);
+    if (u.discordId) return String(u.discordId);
+    if (u.email) return String(u.email);
+    return u.id || '';
+  };
 
+  const suggestSlugFromUser = (u) => {
+    const raw =
+      (u?.discordUsername ? u.discordUsername : '') ||
+      (u?.discordGlobalName ? u.discordGlobalName : '') ||
+      (u?.email ? String(u.email).split('@')[0] : '') ||
+      '';
+    // normalizeSlug is your helper (a-z0-9- etc)
+    return normalizeSlug(raw);
+  };
+
+  const loadRequests = useCallback(async () => {
+    setRequestsLoading(true);
+    setErrorMsg('');
+    setStatusMsg('');
+    try {
+      const data = await adminGetSpaceRequests(reqStatusFilter);
+      const reqs = data?.requests || [];
+      setRequests(reqs);
+
+      // initialize slug inputs for each request (prefer suggestedSlug, then discord username)
+      setSlugEdits((prev) => {
+        const next = { ...prev };
+        for (const r of reqs) {
+          if (next[r.id]) continue;
+
+          const fromDiscord =
+            r.discordUsername ? normalizeSlug(r.discordUsername) :
+            r.discordGlobalName ? normalizeSlug(r.discordGlobalName) :
+            '';
+
+          const fromSuggested = r.suggestedSlug ? normalizeSlug(r.suggestedSlug) : '';
+          const fromEmail = r.email ? normalizeSlug(String(r.email).split('@')[0]) : '';
+
+          next[r.id] = fromSuggested || fromDiscord || fromEmail;
+        }
+        return next;
+      });
+
+      setSlugErrors({});
+      setStatusMsg(`Loaded ${reqs.length || 0} request(s): ${reqStatusFilter}.`);
+    } catch (err) {
+      console.error(err);
+      if (setAuthErrorFrom(err)) return;
+      setErrorMsg(err.payload?.message || err.payload?.error || 'Failed to load requests.');
+    } finally {
+      setRequestsLoading(false);
+    }
+  }, [reqStatusFilter]);
+
+  // boot
   useEffect(() => {
-    if (adminToken) {
-      loadRequests(adminToken);
-      loadApproved(adminToken);
-    } else {
-      setRequests([]);
-      setApprovedUsers([]);
-    }
-  }, [adminToken, loadRequests, loadApproved]);
+    let mounted = true;
+    (async () => {
+      try {
+        await loadRequests();
+      } finally {
+        if (mounted) setBooting(false);
+      }
+    })();
+    return () => { mounted = false; };
+  }, [loadRequests]);
 
-  const handleAddAllowEmail = async () => {
-    const email = newAllowEmail.trim();
-    if (!email) return;
-    try {
-      setAllowlistError('');
-      await adminAddApprovedUser(adminToken, email);
-      setNewAllowEmail('');
-      await loadApproved(adminToken);
-    } catch (err) {
-      console.error(err);
-      setAllowlistError(err.payload?.message || 'Failed to add email.');
-    }
-  };
+  // user search (debounced)
+  useEffect(() => {
+    let alive = true;
+    const q = String(userQuery || '').trim();
 
-  const handleRemoveAllowEmail = async (email) => {
-    if (!window.confirm(`Remove "${email}" from allowlist?`)) return;
-    try {
-      setAllowlistError('');
-      await adminRemoveApprovedUser(adminToken, email);
-      await loadApproved(adminToken);
-    } catch (err) {
-      console.error(err);
-      setAllowlistError(err.payload?.message || 'Failed to remove email.');
-    }
-  };
+    const t = setTimeout(async () => {
+      setUserSearching(true);
+      try {
+        const data = await adminSearchUsers(q, 25);
+        if (!alive) return;
+        setUserResults(data?.users || []);
+      } catch (err) {
+        console.error(err);
+        if (setAuthErrorFrom(err)) return;
+        if (!alive) return;
+        // don’t spam error UI for search; just clear results
+        setUserResults([]);
+      } finally {
+        if (alive) setUserSearching(false);
+      }
+    }, 250);
 
-  const handleSaveToken = (e) => {
-    e.preventDefault();
-    const formData = new FormData(e.target);
-    const token = (formData.get('adminToken') || '').toString().trim();
-    if (!token) return;
-    setAdminToken(token);
-    localStorage.setItem('adminToken', token);
-    // this will trigger useEffect and load both requests + allowlist,
-    // but we can eagerly load requests too:
-    loadRequests(token);
-  };
+    return () => {
+      alive = false;
+      clearTimeout(t);
+    };
+  }, [userQuery]);
 
   const handleSlugChange = (reqId, rawInput) => {
     const normalized = normalizeSlug(rawInput);
     setSlugEdits((prev) => ({ ...prev, [reqId]: normalized }));
 
     if (!normalized) {
-      setSlugErrors((prev) => ({
-        ...prev,
-        [reqId]: 'Slug is required.',
-      }));
+      setSlugErrors((prev) => ({ ...prev, [reqId]: 'Slug is required.' }));
     } else if (!isValidSlug(normalized)) {
-      setSlugErrors((prev) => ({
-        ...prev,
-        [reqId]: 'Slug must be 3–32 chars (a–z, 0–9, hyphen).',
-      }));
+      setSlugErrors((prev) => ({ ...prev, [reqId]: 'Slug must be 3–32 chars (a–z, 0–9, hyphen).' }));
     } else {
       setSlugErrors((prev) => {
         const next = { ...prev };
@@ -3619,91 +3672,42 @@ function AdminDashboard() {
     const fromState = typeof raw === 'string' && raw.length > 0 ? raw : null;
     if (fromState) return fromState;
 
-    const base =
-      (req.suggestedSlug && req.suggestedSlug.toLowerCase()) ||
-      ((req.email || '')
-        .split('@')[0]
-        .replace(/[^a-z0-9-]/g, '-') || '');
-    return normalizeSlug(base);
+    const fromSuggested = req.suggestedSlug ? normalizeSlug(req.suggestedSlug) : '';
+    const fromDiscord =
+      req.discordUsername ? normalizeSlug(req.discordUsername) :
+      req.discordGlobalName ? normalizeSlug(req.discordGlobalName) :
+      '';
+    const fromEmail = req.email ? normalizeSlug(String(req.email).split('@')[0]) : '';
+    return fromSuggested || fromDiscord || fromEmail;
   };
 
-  const handleApprove = async (reqId) => {
+  const handleApprove = async (reqId, quotaMbOverride = null) => {
     const req = requests.find((r) => r.id === reqId);
     if (!req) return;
 
-    const slug = getSlugForRequest(req);
-    const normalized = normalizeSlug(slug);
-
-    if (!normalized || !isValidSlug(normalized)) {
-      setSlugErrors((prev) => ({
-        ...prev,
-        [reqId]: 'Slug must be 3–32 chars (a–z, 0–9, hyphen).',
-      }));
+    const slug = normalizeSlug(getSlugForRequest(req));
+    if (!slug || !isValidSlug(slug)) {
+      setSlugErrors((prev) => ({ ...prev, [reqId]: 'Slug must be 3–32 chars (a–z, 0–9, hyphen).' }));
       return;
     }
 
-    const quotaMb = 100;
+    const quotaMb = Number.isFinite(Number(quotaMbOverride)) ? Number(quotaMbOverride) : 100;
 
     try {
-      setStatusMsg(`Approving request for ${req.email}…`);
       setErrorMsg('');
-      await adminApproveSpaceRequest(adminToken, reqId, {
-        slug: normalized,
-        quotaMb,
-      });
+      setStatusMsg(`Approving ${req.email || req.discordUsername || req.userId}…`);
+      await adminApproveSpaceRequest(reqId, { slug, quotaMb });
       setRequests((prev) => prev.filter((r) => r.id !== reqId));
-      setStatusMsg(`Approved ${req.email} with space "${normalized}" (${quotaMb} MB).`);
+      setStatusMsg(`Approved request → space "${slug}" (${quotaMb} MB).`);
     } catch (err) {
       console.error(err);
+      if (setAuthErrorFrom(err)) return;
+
       const code = err.payload?.error;
       if (err.status === 409 && (code === 'space_exists' || code === 'dir_exists')) {
-        setSlugErrors((prev) => ({
-          ...prev,
-          [reqId]: err.payload?.message || 'Slug already in use. Choose another.',
-        }));
+        setSlugErrors((prev) => ({ ...prev, [reqId]: err.payload?.message || 'Slug already in use.' }));
       } else {
-        setErrorMsg(err.payload?.message || 'Failed to approve request.');
-      }
-    }
-  };
-
-  const handleApproveCustom = async (reqId) => {
-    const req = requests.find((r) => r.id === reqId);
-    if (!req) return;
-
-    const slug = getSlugForRequest(req);
-    const normalized = normalizeSlug(slug);
-
-    if (!normalized || !isValidSlug(normalized)) {
-      setSlugErrors((prev) => ({
-        ...prev,
-        [reqId]: 'Slug must be 3–32 chars (a–z, 0–9, hyphen).',
-      }));
-      return;
-    }
-
-    const quotaInput = window.prompt('Quota in MB (default 100):', '100');
-    const quotaMb = quotaInput ? Number(quotaInput) : 100;
-
-    try {
-      setStatusMsg(`Approving request for ${req.email}…`);
-      setErrorMsg('');
-      await adminApproveSpaceRequest(adminToken, reqId, {
-        slug: normalized,
-        quotaMb,
-      });
-      setRequests((prev) => prev.filter((r) => r.id !== reqId));
-      setStatusMsg(`Approved ${req.email} with space "${normalized}" (${quotaMb} MB).`);
-    } catch (err) {
-      console.error(err);
-      const code = err.payload?.error;
-      if (err.status === 409 && (code === 'space_exists' || code === 'dir_exists')) {
-        setSlugErrors((prev) => ({
-          ...prev,
-          [reqId]: err.payload?.message || 'Slug already in use. Choose another.',
-        }));
-      } else {
-        setErrorMsg(err.payload?.message || 'Failed to approve request.');
+        setErrorMsg(err.payload?.message || err.payload?.error || 'Failed to approve request.');
       }
     }
   };
@@ -3712,311 +3716,609 @@ function AdminDashboard() {
     const req = requests.find((r) => r.id === reqId);
     if (!req) return;
 
-    const reason = window.prompt(
-      'Optional reason for rejection (shown only in logs for now):',
-      ''
-    );
+    const reason = window.prompt('Optional reason for rejection:', '') || '';
 
     try {
-      setStatusMsg('Rejecting request...');
       setErrorMsg('');
-      await adminRejectSpaceRequest(adminToken, reqId, reason || null);
+      setStatusMsg('Rejecting request…');
+      await adminRejectSpaceRequest(reqId, reason || null);
       setRequests((prev) => prev.filter((r) => r.id !== reqId));
-      setStatusMsg(`Rejected request from ${req.email}.`);
+      setStatusMsg('Rejected request.');
     } catch (err) {
       console.error(err);
-      setErrorMsg(err.payload?.message || 'Failed to reject request.');
+      if (setAuthErrorFrom(err)) return;
+      setErrorMsg(err.payload?.message || err.payload?.error || 'Failed to reject request.');
     }
   };
-  return (
-    <div className="login-shell">
-      <div className="login-card" style={{ maxWidth: 640 }}>
-        <h1>Admin · Workspace Requests</h1>
-        <p style={{ marginBottom: 8 }}>
-          Manage workspace requests for approved users. This view uses the same <code>ADMIN_TOKEN</code>{' '}
-          that the API expects in the <code>x-admin-token</code> header.
-        </p>
 
-        <form onSubmit={handleSaveToken} style={{ marginBottom: 10, border: '1px solid var(--panel-border)', borderRadius: 8, padding: '6px 10px', background: 'var(--bg-main)' }}>
-          <label style={{ fontSize: 12, color: 'var(--ok)' }}>
-            Admin Password:
+  const handlePickOwnerForCreate = (u) => {
+    setCreateOwnerUser(u);
+    if (!createSlug) {
+      const suggestion = suggestSlugFromUser(u);
+      if (suggestion) setCreateSlug(suggestion);
+    }
+  };
+
+  const handleCreateSpace = async () => {
+    const slug = normalizeSlug(createSlug);
+    if (!slug || !isValidSlug(slug)) {
+      setErrorMsg('Create space: slug must be 3–32 chars (a–z, 0–9, hyphen).');
+      return;
+    }
+
+    try {
+      setCreatingSpace(true);
+      setErrorMsg('');
+      setStatusMsg('Creating space…');
+
+      const data = await adminCreateSpace({
+        slug,
+        quotaMb: Number(createQuotaMb) || 100,
+        ownerUserId: createOwnerUser?.id || null,
+        // ownerEmail is optional; prefer ownerUserId
+        ownerEmail: null,
+      });
+
+      setStatusMsg(`Created space "${data?.space?.slug || slug}".`);
+      // reset minimal fields
+      setCreateSlug('');
+      setCreateOwnerUser(null);
+    } catch (err) {
+      console.error(err);
+      if (setAuthErrorFrom(err)) return;
+      setErrorMsg(err.payload?.message || err.payload?.error || 'Failed to create space.');
+    } finally {
+      setCreatingSpace(false);
+    }
+  };
+
+  const handlePickEmailUser = (u) => {
+    setEmailUser(u);
+    // convenience: if empty from/subject, don’t overwrite; otherwise leave as-is
+  };
+
+  const handleSendEmail = async () => {
+    if (!emailUser?.id) {
+      setErrorMsg('Send email: pick a user first.');
+      return;
+    }
+    if (!String(emailSubject || '').trim()) {
+      setErrorMsg('Send email: subject is required.');
+      return;
+    }
+    if (!String(emailBody || '').trim()) {
+      setErrorMsg('Send email: body is required.');
+      return;
+    }
+
+    try {
+      setSendingEmail(true);
+      setErrorMsg('');
+      setStatusMsg('Sending email…');
+
+      await adminSendUserEmail(emailUser.id, {
+        subject: String(emailSubject).trim(),
+        text: emailAsHtml ? '' : String(emailBody),
+        html: emailAsHtml ? String(emailBody) : '',
+        from: String(emailFrom || '').trim() || null,
+      });
+
+      setStatusMsg(`Sent email to ${bestHandle(emailUser)}.`);
+    } catch (err) {
+      console.error(err);
+      if (setAuthErrorFrom(err)) return;
+      setErrorMsg(err.payload?.message || err.payload?.error || 'Failed to send email.');
+    } finally {
+      setSendingEmail(false);
+    }
+  };
+
+  if (booting) {
+    return (
+      <div className="login-shell">
+        <div className="login-card">
+          <h1>Admin</h1>
+          <p>Loading…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (forbidden) {
+    return (
+      <div className="login-shell">
+        <div className="login-card" style={{ maxWidth: 720 }}>
+          <h1>Admin</h1>
+          <p style={{ color: 'var(--danger)' }}>
+            You’re signed in, but you’re not authorized to access the admin dashboard.
+          </p>
+          <button className="button small" type="button" onClick={() => navigate('/')}>
+            Back to app
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        width: '100%',
+        padding: 18,
+        background: 'var(--bg-elevated)',
+        boxSizing: 'border-box',
+      }}
+    >
+      <div
+        className="login-card"
+        style={{
+          width: 'min(1200px, 96vw)',
+          maxWidth: 1200,
+          minHeight: 'calc(100vh - 36px)',
+          margin: '0 auto',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 12,
+        }}
+      >
+        <div>
+          <h1 style={{ marginBottom: 6 }}>Admin · Workspace Requests</h1>
+          <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            Admin access is granted by Discord ID (server env: <code>ADMIN_DISCORD_IDS</code>).
+          </p>
+        </div>
+
+        {(statusMsg || errorMsg) && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {statusMsg && (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{statusMsg}</div>
+            )}
+            {errorMsg && (
+              <div style={{ fontSize: 12, color: 'var(--danger)' }}>{errorMsg}</div>
+            )}
+          </div>
+        )}
+
+        {/* Top controls: filter + refresh */}
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+          <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            Requests
+            <select
+              className="theme-select"
+              value={reqStatusFilter}
+              onChange={(e) => setReqStatusFilter(e.target.value)}
+              style={{ marginLeft: 8 }}
+            >
+              <option value="pending">pending</option>
+              <option value="approved">approved</option>
+              <option value="rejected">rejected</option>
+              <option value="all">all</option>
+            </select>
+          </label>
+
+          <button
+            type="button"
+            className="button small"
+            onClick={loadRequests}
+            disabled={requestsLoading}
+          >
+            {requestsLoading ? 'Loading…' : 'Refresh'}
+          </button>
+
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <input
-              name="adminToken"
-              type="password"
-              defaultValue={adminToken}
+              type="text"
+              value={userQuery}
+              onChange={(e) => setUserQuery(e.target.value)}
+              placeholder="Search users (@handle, global name, email, u_…, discordId)…"
               style={{
-                marginTop: 4,
+                width: 'min(520px, 92vw)',
+                borderRadius: 999,
+                border: '1px solid var(--panel-border)',
+                background: 'var(--bg-main)',
+                color: 'var(--text-main)',
+                padding: '8px 12px',
+                fontSize: 13,
+                outline: 'none',
+              }}
+            />
+          </div>
+        </div>
+
+        {/* User search results (shared picker) */}
+        {userQuery.trim() && (
+          <div
+            style={{
+              border: '1px solid var(--panel-border)',
+              borderRadius: 12,
+              padding: 10,
+              background: 'var(--bg-main)',
+              maxHeight: 220,
+              overflowY: 'auto',
+            }}
+          >
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
+              {userSearching ? 'Searching…' : `Results (${userResults.length})`}
+              <span style={{ marginLeft: 10, opacity: 0.75 }}>
+                Click a user to set as “Create space owner”. Shift+Click sets as “Email recipient”.
+              </span>
+            </div>
+
+            {userResults.length === 0 && !userSearching ? (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No matches.</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {userResults.map((u) => {
+                  const label = bestHandle(u);
+                  const sub = [
+                    u.id ? `id: ${u.id}` : '',
+                    u.discordId ? `discordId: ${u.discordId}` : '',
+                    u.email ? `email: ${u.email}` : (u.pendingEmail ? `pending: ${u.pendingEmail}` : ''),
+                    u.emailVerifiedAt ? 'verified' : 'unverified',
+                  ].filter(Boolean).join(' · ');
+
+                  return (
+                    <button
+                      key={u.id}
+                      type="button"
+                      className="button small"
+                      style={{
+                        textAlign: 'left',
+                        justifyContent: 'flex-start',
+                        borderRadius: 12,
+                      }}
+                      onClick={(e) => {
+                        if (e.shiftKey) handlePickEmailUser(u);
+                        else handlePickOwnerForCreate(u);
+                      }}
+                    >
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                        <div style={{ fontSize: 12, color: 'var(--text-main)' }}>{label}</div>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{sub}</div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Panels */}
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+          {/* Create space */}
+          <div
+            style={{
+              flex: '1 1 420px',
+              border: '1px solid var(--panel-border)',
+              borderRadius: 12,
+              padding: 12,
+              background: 'var(--bg-main)',
+              minHeight: 220,
+            }}
+          >
+            <h2 style={{ fontSize: 14, margin: '0 0 10px', color: 'var(--text-main)' }}>
+              Create space
+            </h2>
+
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+              <input
+                type="text"
+                value={createSlug}
+                onChange={(e) => setCreateSlug(e.target.value)}
+                placeholder="slug (e.g. demo-hud)"
+                style={{
+                  flex: '1 1 180px',
+                  borderRadius: 999,
+                  border: '1px solid var(--panel-border)',
+                  background: 'var(--bg-main)',
+                  color: 'var(--text-main)',
+                  padding: '8px 12px',
+                  fontSize: 13,
+                  outline: 'none',
+                }}
+              />
+              <input
+                type="number"
+                value={createQuotaMb}
+                onChange={(e) => setCreateQuotaMb(e.target.value)}
+                placeholder="quota MB"
+                style={{
+                  width: 120,
+                  borderRadius: 999,
+                  border: '1px solid var(--panel-border)',
+                  background: 'var(--bg-main)',
+                  color: 'var(--text-main)',
+                  padding: '8px 12px',
+                  fontSize: 13,
+                  outline: 'none',
+                }}
+              />
+            </div>
+
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
+              Owner (pick via search above):
+              <div style={{ marginTop: 4, color: 'var(--text-main)' }}>
+                {createOwnerUser ? (
+                  <>
+                    <strong>{bestHandle(createOwnerUser)}</strong> <span style={{ opacity: 0.7 }}>({createOwnerUser.id})</span>
+                  </>
+                ) : (
+                  <span style={{ opacity: 0.8 }}>none</span>
+                )}
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="button small primary"
+                onClick={handleCreateSpace}
+                disabled={creatingSpace}
+              >
+                {creatingSpace ? 'Creating…' : 'Create'}
+              </button>
+
+              {createOwnerUser && (
+                <button
+                  type="button"
+                  className="button small"
+                  onClick={() => setCreateOwnerUser(null)}
+                  disabled={creatingSpace}
+                >
+                  Clear owner
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Send email */}
+          <div
+            style={{
+              flex: '1 1 420px',
+              border: '1px solid var(--panel-border)',
+              borderRadius: 12,
+              padding: 12,
+              background: 'var(--bg-main)',
+              minHeight: 220,
+            }}
+          >
+            <h2 style={{ fontSize: 14, margin: '0 0 10px', color: 'var(--text-main)' }}>
+              Send email
+            </h2>
+
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
+              Recipient (Shift+Click a user in search results):
+              <div style={{ marginTop: 4, color: 'var(--text-main)' }}>
+                {emailUser ? (
+                  <>
+                    <strong>{bestHandle(emailUser)}</strong> <span style={{ opacity: 0.7 }}>({emailUser.id})</span>
+                  </>
+                ) : (
+                  <span style={{ opacity: 0.8 }}>none</span>
+                )}
+              </div>
+            </div>
+
+            <input
+              type="text"
+              value={emailSubject}
+              onChange={(e) => setEmailSubject(e.target.value)}
+              placeholder="subject"
+              style={{
                 width: '100%',
                 borderRadius: 999,
                 border: '1px solid var(--panel-border)',
                 background: 'var(--bg-main)',
                 color: 'var(--text-main)',
-                padding: '6px 10px',
-                fontSize: 13
+                padding: '8px 12px',
+                fontSize: 13,
+                outline: 'none',
+                marginBottom: 8,
               }}
             />
-          </label>
-          <div style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', gap: 8}}>
-            <button className="button small" type="submit">
-              Save & load requests
-            </button>
-            <button
-              className="button small"
-              type="button"
-              onClick={() => {
-                setAdminToken('');
-                localStorage.removeItem('adminToken');
-                setRequests([]);
-                setSlugEdits({});
-                setSlugErrors({});
-              }}
-            >
-              Clear token
-            </button>
-          </div>
-        </form>
-{/* Allowlist panel */}
-        <div
-          style={{
-            marginBottom: 12,
-            padding: 8,
-            borderRadius: 8,
-            border: '1px solid var(--panel-border)',
-            background: 'var(--bg-main)',
-          }}
-        >
-          <h2 style={{ fontSize: 14, margin: '0 0 6px', color: 'var(--ok)' }}>Approved emails</h2>
-          <p style={{ fontSize: 12, color: 'var(--text-main)', margin: '0 0 8px' }}>
-            Only emails on this allowlist can receive magic-link logins.
-          </p>
 
-          <div
-            style={{
-              display: 'flex',
-              gap: 8,
-              marginBottom: 8,
-              alignItems: 'center',
-              flexWrap: 'wrap',
-            }}
-          >
-            <input
-              type="email"
-              placeholder="new-user@example.com"
-              value={newAllowEmail}
-              onChange={(e) => setNewAllowEmail(e.target.value)}
+            <textarea
+              value={emailBody}
+              onChange={(e) => setEmailBody(e.target.value)}
+              placeholder="Text body…"
               style={{
-                flex: '1 1 200px',
-                minWidth: 0,
-                borderRadius: 999,
+                width: '100%',
+                minHeight: 110,
+                borderRadius: 12,
                 border: '1px solid var(--panel-border)',
                 background: 'var(--bg-main)',
                 color: 'var(--text-main)',
-                padding: '6px 10px',
+                padding: '10px 12px',
                 fontSize: 13,
+                outline: 'none',
+                resize: 'vertical',
+                marginBottom: 8,
               }}
             />
-            <button
-              type="button"
-              className="button small"
-              onClick={handleAddAllowEmail}
-              disabled={!newAllowEmail.trim()}
-            >
-              Add email
-            </button>
-          </div>
 
-          {allowlistLoading ? (
-            <div style={{ fontSize: 12, color: 'var(--ok)' }}>
-              Loading allowlist…
-            </div>
-          ) : approvedUsers.length === 0 ? (
-            <div style={{ fontSize: 12, color: 'var(--accent-secondary)' }}>
-              No approved emails yet. Add at least one to allow logins.
-            </div>
-          ) : (
-            <ul
-              style={{
-                listStyle: 'none',
-                padding: 0,
-                margin: 0,
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 4,
-                maxHeight: 160,
-                overflowY: 'auto',
-              }}
-            >
-              {approvedUsers.map((u) => (
-                <li
-                  key={u.email}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    fontSize: 12,
-                  }}
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+              <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'inline-flex', gap: 8, alignItems: 'center' }}>
+                <input
+                  type="checkbox"
+                  checked={emailAsHtml}
+                  onChange={(e) => setEmailAsHtml(e.target.checked)}
+                />
+                Send as HTML
+              </label>
+
+              <input
+                type="text"
+                value={emailFrom}
+                onChange={(e) => setEmailFrom(e.target.value)}
+                placeholder="from override (optional)"
+                style={{
+                  flex: '1 1 220px',
+                  borderRadius: 999,
+                  border: '1px solid var(--panel-border)',
+                  background: 'var(--bg-main)',
+                  color: 'var(--text-main)',
+                  padding: '8px 12px',
+                  fontSize: 13,
+                  outline: 'none',
+                }}
+              />
+
+              <button
+                type="button"
+                className="button small primary"
+                onClick={handleSendEmail}
+                disabled={sendingEmail}
+              >
+                {sendingEmail ? 'Sending…' : 'Send'}
+              </button>
+
+              {emailUser && (
+                <button
+                  type="button"
+                  className="button small"
+                  onClick={() => setEmailUser(null)}
+                  disabled={sendingEmail}
                 >
-                  <div>
-                    <span style={{ color: 'var(--text-main)' }}>{u.email}</span>
-                    {u.createdAt && (
-                      <span style={{ color: 'var(--text-main)', marginLeft: 6 }}>
-                        · {u.createdAt}
-                      </span>
-                    )}
-                  </div>
-                  <button
-                    type="button"
-                    className="button small"
-                    onClick={() => handleRemoveAllowEmail(u.email)}
-                  >
-                    Remove
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-
-          {allowlistError && (
-            <div style={{ marginTop: 6, fontSize: 12, color: '#f97373' }}>
-              {allowlistError}
+                  Clear user
+                </button>
+              )}
             </div>
-          )}
+          </div>
         </div>
-        {loading && (
-          <div style={{ fontSize: 12, color: 'var(--ok)', marginBottom: 8 }}>
-            Loading pending requests…
-          </div>
-        )}
-        {statusMsg && (
-          <div style={{ fontSize: 12, color: 'var(--danger)', marginBottom: 4 }}>
-            {statusMsg}
-          </div>
-        )}
-        {errorMsg && (
-          <div style={{ fontSize: 12, color: '#f97373', marginBottom: 8 }}>
-            {errorMsg}
-          </div>
-        )}
 
-        {requests.length === 0 && !loading ? (
-          <div style={{ fontSize: 13, color: 'var(--ok)' }}>
-            No pending requests.
-          </div>
-        ) : (
-          <div
-            style={{
-              marginTop: 6,
-              maxHeight: 360,
-              overflowY: 'auto',
-              borderRadius: 8,
-              border: '1px solid var(--panel-border)',
-              padding: 8,
-              background: 'rgba(15,23,42,0.9)'
-            }}
-          >
-            {requests.map((r) => {
-              const slugValue = getSlugForRequest(r);
-              const slugError = slugErrors[r.id] || null;
-              const slugIsValid = slugValue && isValidSlug(slugValue);
+        {/* Requests list */}
+        <div
+          style={{
+            flex: '1 1 auto',
+            border: '1px solid var(--panel-border)',
+            borderRadius: 12,
+            padding: 12,
+            background: 'var(--bg-main)',
+            minHeight: 240,
+          }}
+        >
+          <h2 style={{ fontSize: 14, margin: '0 0 10px', color: 'var(--text-main)' }}>
+            Workspace requests
+          </h2>
 
-              return (
-                <div
-                  key={r.id}
-                  style={{
-                    padding: 8,
-                    borderRadius: 6,
-                    border: '1px solid var(--panel-border)',
-                    marginBottom: 6,
-                    fontSize: 12
-                  }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                    <div>
-                      <strong>{r.email}</strong>
-                      <div style={{ fontSize: 11, color: 'var(--danger)' }}>
-                        userId: {r.userId}
+          {requestsLoading ? (
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Loading…</div>
+          ) : requests.length === 0 ? (
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No requests.</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {requests.map((r) => {
+                const slugValue = getSlugForRequest(r);
+                const slugError = slugErrors[r.id] || null;
+                const slugIsValid = slugValue && isValidSlug(slugValue);
+
+                const who =
+                  (r.discordUsername ? `@${r.discordUsername}` : '') ||
+                  (r.discordGlobalName ? String(r.discordGlobalName) : '') ||
+                  (r.email ? String(r.email) : '') ||
+                  (r.userId ? String(r.userId) : r.id);
+
+                return (
+                  <div
+                    key={r.id}
+                    style={{
+                      border: '1px solid var(--panel-border)',
+                      borderRadius: 12,
+                      padding: 10,
+                      background: 'var(--bg-main)',
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+                      <div style={{ fontSize: 13, color: 'var(--text-main)' }}>
+                        <strong>{who}</strong>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                          requestId: {r.id} · userId: {r.userId || '—'} · {r.createdAt || ''}
+                        </div>
+                      </div>
+
+                      <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                        status: <strong>{r.status}</strong>
                       </div>
                     </div>
-                    <div style={{ fontSize: 11, color: 'var(--danger)' }}>
-                      {r.createdAt}
-                    </div>
-                  </div>
 
-                  {r.note && (
-                    <div style={{ fontSize: 12, marginBottom: 6 }}>
-                      Request note:{' '}
-                      <span style={{ color: 'var(--accent-primary)' }}>{r.note}</span>
-                    </div>
-                  )}
+                    {r.note ? (
+                      <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-main)' }}>
+                        Note: <span style={{ color: 'var(--accent-secondary)' }}>{r.note}</span>
+                      </div>
+                    ) : null}
 
-                  <div style={{ marginBottom: 6 }}>
-                    <label style={{ fontSize: 11, display: 'block' }}>
-                      Space slug
-                      <input
-                        type="text"
-                        value={slugValue}
-                        onChange={(e) => handleSlugChange(r.id, e.target.value)}
-                        placeholder="e.g. scott-hud"
-                        style={{
-                          marginTop: 4,
-                          width: '100%',
-                          borderRadius: 999,
-                          border: '1px solid var(--panel-border)',
-                          background: 'var(--bg-main)',
-                          color: 'var(--text-main)',
-                          padding: '4px 10px',
-                          fontSize: 12
-                        }}
-                      />
-                    </label>
-                    <div style={{ fontSize: 10, marginTop: 2 }}>
-                      <span style={{ color: 'var(--text-muted)' }}>
-                        3–32 chars; lowercase letters, digits, hyphens only.
-                      </span>
+                    <div style={{ marginTop: 10, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+                      <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                        Space slug
+                        <input
+                          type="text"
+                          value={slugValue}
+                          onChange={(e) => handleSlugChange(r.id, e.target.value)}
+                          placeholder="e.g. southphilly-hud"
+                          style={{
+                            marginTop: 6,
+                            width: 260,
+                            borderRadius: 999,
+                            border: '1px solid var(--panel-border)',
+                            background: 'var(--bg-main)',
+                            color: 'var(--text-main)',
+                            padding: '8px 12px',
+                            fontSize: 13,
+                            outline: 'none',
+                          }}
+                        />
+                      </label>
+
                       {slugError && (
-                        <div style={{ color: 'var(--danger)', marginTop: 2 }}>
+                        <div style={{ fontSize: 12, color: 'var(--danger)' }}>
                           {slugError}
                         </div>
                       )}
+
+                      <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        <button
+                          type="button"
+                          className="button small"
+                          onClick={() => handleApprove(r.id, 100)}
+                          disabled={!slugIsValid}
+                        >
+                          Approve
+                        </button>
+                        <button
+                          type="button"
+                          className="button small"
+                          onClick={() => {
+                            const q = window.prompt('Quota in MB:', '100');
+                            const n = q ? Number(q) : 100;
+                            handleApprove(r.id, n);
+                          }}
+                          disabled={!slugIsValid}
+                        >
+                          Approve (custom quota)
+                        </button>
+                        <button
+                          type="button"
+                          className="button small"
+                          onClick={() => handleReject(r.id)}
+                        >
+                          Reject
+                        </button>
+                      </div>
                     </div>
                   </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
 
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 4 }}>
-                    <button
-                      className="button small"
-                      type="button"
-                      onClick={() => handleApprove(r.id)}
-                      title="Approve using current slug and default quota"
-                      disabled={!slugIsValid}
-                    >
-                      Approve
-                    </button>
-                    <button
-                      className="button small"
-                      type="button"
-                      onClick={() => handleApproveCustom(r.id)}
-                      title="Approve with current slug and custom quota"
-                      disabled={!slugIsValid}
-                    >
-                      Approve (custom quota)
-                    </button>
-                    <button
-                      className="button small"
-                      type="button"
-                      onClick={() => handleReject(r.id)}
-                    >
-                      Reject
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
       </div>
     </div>
   );
 }
+
 
 export default function App() {
   return (
