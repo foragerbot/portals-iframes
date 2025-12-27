@@ -340,3 +340,21 @@ export function adminSendEmailTemplate(id, { userId, spaceSlug = null } = {}) {
     body: JSON.stringify({ userId, ...(spaceSlug ? { spaceSlug } : {}) }),
   });
 }
+
+export function adminGetDuplicateUsers() {
+  return request('/api/admin/users/duplicates', { method: 'GET' });
+}
+
+export function adminMergeUsers({ sourceUserId, targetUserId, primaryEmail = null } = {}) {
+  return request('/api/admin/users/merge', {
+    method: 'POST',
+    body: JSON.stringify({ sourceUserId, targetUserId, ...(primaryEmail ? { primaryEmail } : {}) }),
+  });
+}
+
+export function adminDeleteUser(userId, reason = null) {
+  return request(`/api/admin/users/${encodeURIComponent(userId)}/delete`, {
+    method: 'POST',
+    body: JSON.stringify({ ...(reason ? { reason } : {}) }),
+  });
+}

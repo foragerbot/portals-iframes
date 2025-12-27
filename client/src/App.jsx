@@ -34,7 +34,9 @@ import {
   adminGetActivity,
   adminDoctor,
   adminListEmailTemplates,
-  adminGetUserSessions
+  adminGetUserSessions,
+  adminGetDuplicateUsers,
+  adminMergeUsers
 } from './api.js';
 
 import ReactMarkdown from 'react-markdown';
@@ -3923,6 +3925,110 @@ const extractUserId = (obj) => {
     }
   };
 
+  // ───────────────── Identity (duplicates + merge + delete) ─────────────────
+const [idLoading, setIdLoading] = useState(false);
+const [idError, setIdError] = useState('');
+const [dupGroups, setDupGroups] = useState([]);
+
+const [idQuery, setIdQuery] = useState(''); // filter by email/userId/discordId
+const [mergeBusyKey, setMergeBusyKey] = useState(''); // `${email}:${sourceId}`
+const [deleteBusyId, setDeleteBusyId] = useState('');
+
+const loadIdentity = useCallback(async () => {
+  setIdLoading(true);
+  setIdError('');
+  try {
+    const data = await adminGetDuplicateUsers();
+    const groups = Array.isArray(data?.groups) ? data.groups : [];
+    setDupGroups(groups);
+  } catch (err) {
+    console.error(err);
+    if (setAuthErrorFrom(err)) return;
+    setIdError(err.payload?.message || err.payload?.error || 'Failed to load duplicates.');
+  } finally {
+    setIdLoading(false);
+  }
+}, []);
+
+useEffect(() => {
+  if (tab !== 'identity') return;
+  if (!dupGroups.length && !idLoading) loadIdentity();
+}, [tab, dupGroups.length, idLoading, loadIdentity]);
+
+const filteredDupGroups = useMemo(() => {
+  const q = String(idQuery || '').trim().toLowerCase();
+  if (!q) return dupGroups;
+
+  const hay = (g) => {
+    const users = Array.isArray(g?.users) ? g.users : [];
+    return [
+      g?.email,
+      g?.recommendedTargetUserId,
+      ...users.flatMap((u) => [u.userId, u.discordId, u.discordUsername, u.email, u.pendingEmail]),
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+  };
+
+  return dupGroups.filter((g) => hay(g).includes(q));
+}, [dupGroups, idQuery]);
+
+const confirmMerge = async ({ email, sourceUserId, targetUserId }) => {
+  if (!sourceUserId || !targetUserId) return;
+
+  const ok = window.confirm(
+    `MERGE USERS\n\nEmail: ${email}\nSource: ${sourceUserId}\nTarget: ${targetUserId}\n\n` +
+      `This will move ownership/session/history references to the target and remove the source user record.\n\nContinue?`
+  );
+  if (!ok) return;
+
+  const key = `${email}:${sourceUserId}`;
+  setMergeBusyKey(key);
+  setIdError('');
+
+  try {
+    await adminMergeUsers({ sourceUserId, targetUserId, primaryEmail: null });
+    // refresh dup list + other dashboards
+    await Promise.allSettled([loadIdentity(), loadBilling?.(), loadAudit?.(), loadActivity?.()]);
+  } catch (err) {
+    console.error(err);
+    if (setAuthErrorFrom(err)) return;
+    setIdError(err.payload?.message || err.payload?.error || 'Merge failed.');
+  } finally {
+    setMergeBusyKey('');
+  }
+};
+
+const confirmDeleteUser = async (userId) => {
+  if (!userId) return;
+
+  const reason = window.prompt(
+    `SOFT DELETE USER\n\nuserId: ${userId}\n\nOptional reason:`,
+    ''
+  );
+
+  const ok = window.confirm(
+    `Confirm soft delete?\n\nuserId: ${userId}\n\nThis will:\n- revoke sessions\n- remove from space members lists\n- mark status=deleted\n\nProceed?`
+  );
+  if (!ok) return;
+
+  setDeleteBusyId(userId);
+  setIdError('');
+
+  try {
+    await adminDeleteUser(userId, reason || null);
+    await Promise.allSettled([loadIdentity(), loadBilling?.(), loadAudit?.(), loadActivity?.()]);
+  } catch (err) {
+    console.error(err);
+    if (setAuthErrorFrom(err)) return;
+    setIdError(err.payload?.message || err.payload?.error || 'Delete failed.');
+  } finally {
+    setDeleteBusyId('');
+  }
+};
+
+
   // ───────────────── Audit ─────────────────
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditEntries, setAuditEntries] = useState([]);
@@ -4637,6 +4743,7 @@ const sendTemplate = async () => {
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button type="button" className={`button small ${tab === 'activity' ? 'primary' : ''}`} onClick={() => setTab('activity')}>Activity</button>
             <button type="button" className={`button small ${tab === 'requests' ? 'primary' : ''}`} onClick={() => setTab('requests')}>Requests</button>
+            <button type="button" className={`button small ${tab === 'identity' ? 'primary' : ''}`} onClick={() => setTab('identity')}>Identity</button>
             <button type="button" className={`button small ${tab === 'billing' ? 'primary' : ''}`} onClick={() => setTab('billing')}>Billing</button>
             <button type="button" className={`button small ${tab === 'create' ? 'primary' : ''}`} onClick={() => setTab('create')}>Create Space</button>
             <button type="button" className={`button small ${tab === 'email' ? 'primary' : ''}`} onClick={() => setTab('email')}>Send Email</button>
@@ -5574,6 +5681,214 @@ const sendTemplate = async () => {
     </div>
   </div>
 )} 
+
+{tab === 'identity' && (
+  <div
+    style={{
+      border: '1px solid var(--panel-border)',
+      borderRadius: 12,
+      padding: 12,
+      background: 'var(--bg-main)',
+    }}
+  >
+    <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+      <h2 style={{ fontSize: 14, margin: 0, color: 'var(--text-main)' }}>
+        Identity
+      </h2>
+
+      <button
+        type="button"
+        className="button small"
+        onClick={loadIdentity}
+        disabled={idLoading}
+      >
+        {idLoading ? 'Loading…' : 'Refresh'}
+      </button>
+
+      <input
+        type="text"
+        value={idQuery}
+        onChange={(e) => setIdQuery(e.target.value)}
+        placeholder="Filter (email, userId, discordId, @handle)…"
+        style={{
+          marginLeft: 'auto',
+          width: 'min(420px, 92vw)',
+          borderRadius: 999,
+          border: '1px solid var(--panel-border)',
+          background: 'var(--bg-main)',
+          color: 'var(--text-main)',
+          padding: '8px 12px',
+          fontSize: 13,
+          outline: 'none',
+        }}
+      />
+    </div>
+
+    {idError && (
+      <div style={{ fontSize: 12, color: 'var(--danger)', marginBottom: 10 }}>
+        {idError}
+      </div>
+    )}
+
+    <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>
+      Duplicates are detected by the same email appearing across <code>email</code>, <code>pendingEmail</code>, or <code>emails[]</code>.
+      Merge and delete actions are intended for Godmode only.
+    </div>
+
+    {/* Duplicate groups */}
+    {filteredDupGroups.length === 0 ? (
+      <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+        No duplicate groups found.
+      </div>
+    ) : (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {filteredDupGroups.map((g) => {
+          const email = g.email;
+          const users = Array.isArray(g.users) ? g.users : [];
+          const recommended = g.recommendedTargetUserId || null;
+
+          return (
+            <div
+              key={email}
+              style={{
+                border: '1px solid var(--panel-border)',
+                borderRadius: 12,
+                padding: 10,
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+                <div style={{ fontSize: 13, color: 'var(--text-main)' }}>
+                  <strong>{email}</strong>{' '}
+                  <span className="pill pill--tiny" style={{ marginLeft: 6 }}>
+                    {users.length} users
+                  </span>
+                </div>
+
+                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                  recommended target: <code>{recommended || '—'}</code>
+                </div>
+              </div>
+
+              <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {users.map((u) => {
+                  const isTarget = u.userId === recommended;
+                  const hasDiscord = !!String(u.discordId || '').trim();
+                  const label =
+                    (u.discordUsername ? `@${u.discordUsername}` : '') ||
+                    (u.discordId ? u.discordId : '') ||
+                    (u.email ? u.email : '') ||
+                    u.userId;
+
+                  return (
+                    <div
+                      key={u.userId}
+                      style={{
+                        border: '1px solid var(--panel-border)',
+                        borderRadius: 12,
+                        padding: 10,
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        gap: 10,
+                        flexWrap: 'wrap',
+                        alignItems: 'center',
+                      }}
+                    >
+                      <div style={{ minWidth: 280 }}>
+                        <div style={{ fontSize: 12, color: 'var(--text-main)' }}>
+                          <strong>{label}</strong>{' '}
+                          {isTarget ? (
+                            <span className="pill pill--tiny pill--ok" style={{ marginLeft: 6 }}>
+                              target
+                            </span>
+                          ) : null}
+                          {hasDiscord ? (
+                            <span className="pill pill--tiny" style={{ marginLeft: 6 }}>
+                              discord
+                            </span>
+                          ) : (
+                            <span className="pill pill--tiny pill--warn" style={{ marginLeft: 6 }}>
+                              legacy
+                            </span>
+                          )}
+                        </div>
+
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                          userId: <code>{u.userId}</code>
+                        </div>
+
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                          hit: <code>{u.hit?.email}</code>{' '}
+                          {u.hit?.verifiedAt ? (
+                            <span className="pill pill--tiny pill--ok" style={{ marginLeft: 6 }}>
+                              verified
+                            </span>
+                          ) : (
+                            <span className="pill pill--tiny pill--warn" style={{ marginLeft: 6 }}>
+                              unverified
+                            </span>
+                          )}
+                        </div>
+
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                          lastLogin: {u.lastLoginAt ? new Date(u.lastLoginAt).toLocaleString() : '—'}
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        <button
+                          type="button"
+                          className="button small"
+                          onClick={() => openUserDrawer?.(u.userId)}
+                        >
+                          Open
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button small"
+                          onClick={() => openSessionsModal?.(u.userId)}
+                        >
+                          Sessions
+                        </button>
+
+                        {!isTarget && recommended ? (
+                          <button
+                            type="button"
+                            className="button small primary"
+                            disabled={mergeBusyKey === `${email}:${u.userId}`}
+                            onClick={() =>
+                              confirmMerge({
+                                email,
+                                sourceUserId: u.userId,
+                                targetUserId: recommended,
+                              })
+                            }
+                          >
+                            {mergeBusyKey === `${email}:${u.userId}` ? 'Merging…' : 'Merge → target'}
+                          </button>
+                        ) : null}
+
+                        <button
+                          type="button"
+                          className="button small"
+                          disabled={deleteBusyId === u.userId}
+                          onClick={() => confirmDeleteUser(u.userId)}
+                          title="Soft delete (Godmode)"
+                        >
+                          {deleteBusyId === u.userId ? 'Deleting…' : 'Delete'}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    )}
+  </div>
+)}
 
 
         {/* ───────── Audit tab ───────── */}

@@ -4121,6 +4121,28 @@ app.post('/api/admin/space-requests/:id/reject', requireUser, requireAdminUser, 
   }
 });
 
+function deepReplaceExactString(value, replaceMap) {
+  if (value == null) return value;
+
+  if (typeof value === 'string') {
+    return replaceMap.has(value) ? replaceMap.get(value) : value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((v) => deepReplaceExactString(v, replaceMap));
+  }
+
+  if (typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = deepReplaceExactString(v, replaceMap);
+    }
+    return out;
+  }
+
+  return value;
+}
+
 
 // Admin: list workspace requests
 // GET /api/admin/space-requests?status=pending|approved|rejected|all
@@ -5106,6 +5128,432 @@ app.post('/api/admin/users/:id/billing/extend', requireUser, requireAdminUser, r
   }
 });
 
+const GODMODE_DISCORD_ID = String(process.env.GODMODE_DISCORD_ID || '').trim() || null;
+
+function isGodmodeUser(user) {
+  const did = String(user?.discordId || '').trim();
+  return !!GODMODE_DISCORD_ID && !!did && did === GODMODE_DISCORD_ID;
+}
+
+function requireGodmode(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'not_logged_in' });
+  if (!isGodmodeUser(req.user)) return res.status(403).json({ error: 'forbidden' });
+  next();
+}
+
+// GET /api/admin/users/duplicates
+// Finds emails that appear on 2+ user records (across email/pendingEmail/emails[])
+app.get('/api/admin/users/duplicates', requireUser, requireAdminUser, async (req, res, next) => {
+  try {
+    const users = await loadUsersMeta();
+    const arr = Array.isArray(users) ? users.filter(Boolean) : [];
+
+    const emailMap = new Map(); // email -> [{user summary, verifiedAt, source}]
+    for (const u of arr) {
+      const emails = getUserEmails(u); // from Step 8A
+      for (const e of emails) {
+        const em = normalizeEmail(e.email);
+        if (!em) continue;
+        if (!emailMap.has(em)) emailMap.set(em, []);
+        emailMap.get(em).push({
+          userId: u.id,
+          discordId: u.discordId || null,
+          discordUsername: u.discordUsername || null,
+          email: u.email || null,
+          pendingEmail: u.pendingEmail || null,
+          emailVerifiedAt: u.emailVerifiedAt || null,
+          lastLoginAt: u.lastLoginAt || null,
+          status: u.status || 'active',
+          billing: u.billing || {},
+          hit: {
+            email: em,
+            verifiedAt: e.verifiedAt || null,
+            source: e.source || null,
+          },
+        });
+      }
+    }
+
+    // Keep only duplicates
+    const groups = [];
+    for (const [email, hits] of emailMap.entries()) {
+      if (!hits || hits.length < 2) continue;
+
+      // recommend target: prefer discordId; otherwise most recent login; otherwise first
+      const scored = hits.map((h) => {
+        const hasDiscord = !!String(h.discordId || '').trim();
+        const last = Date.parse(h.lastLoginAt || '') || 0;
+        const verified = !!(h.hit?.verifiedAt);
+        const score = (hasDiscord ? 1000 : 0) + (verified ? 100 : 0) + Math.min(99, Math.floor(last / 1e9));
+        return { ...h, _score: score };
+      });
+
+      scored.sort((a, b) => b._score - a._score);
+      const recommendedTargetUserId = scored[0]?.userId || null;
+
+      groups.push({
+        email,
+        count: hits.length,
+        recommendedTargetUserId,
+        users: scored.map(({ _score, ...rest }) => rest),
+      });
+    }
+
+    // stable sort: biggest dup groups first
+    groups.sort((a, b) => b.count - a.count || a.email.localeCompare(b.email));
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok: true, groups });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/admin/users/duplicates
+// Finds emails that appear on 2+ user records (across email/pendingEmail/emails[])
+app.get('/api/admin/users/duplicates', requireUser, requireAdminUser, async (req, res, next) => {
+  try {
+    const users = await loadUsersMeta();
+    const arr = Array.isArray(users) ? users.filter(Boolean) : [];
+
+    const emailMap = new Map(); // email -> [{user summary, verifiedAt, source}]
+    for (const u of arr) {
+      const emails = getUserEmails(u); // from Step 8A
+      for (const e of emails) {
+        const em = normalizeEmail(e.email);
+        if (!em) continue;
+        if (!emailMap.has(em)) emailMap.set(em, []);
+        emailMap.get(em).push({
+          userId: u.id,
+          discordId: u.discordId || null,
+          discordUsername: u.discordUsername || null,
+          email: u.email || null,
+          pendingEmail: u.pendingEmail || null,
+          emailVerifiedAt: u.emailVerifiedAt || null,
+          lastLoginAt: u.lastLoginAt || null,
+          status: u.status || 'active',
+          billing: u.billing || {},
+          hit: {
+            email: em,
+            verifiedAt: e.verifiedAt || null,
+            source: e.source || null,
+          },
+        });
+      }
+    }
+
+    // Keep only duplicates
+    const groups = [];
+    for (const [email, hits] of emailMap.entries()) {
+      if (!hits || hits.length < 2) continue;
+
+      // recommend target: prefer discordId; otherwise most recent login; otherwise first
+      const scored = hits.map((h) => {
+        const hasDiscord = !!String(h.discordId || '').trim();
+        const last = Date.parse(h.lastLoginAt || '') || 0;
+        const verified = !!(h.hit?.verifiedAt);
+        const score = (hasDiscord ? 1000 : 0) + (verified ? 100 : 0) + Math.min(99, Math.floor(last / 1e9));
+        return { ...h, _score: score };
+      });
+
+      scored.sort((a, b) => b._score - a._score);
+      const recommendedTargetUserId = scored[0]?.userId || null;
+
+      groups.push({
+        email,
+        count: hits.length,
+        recommendedTargetUserId,
+        users: scored.map(({ _score, ...rest }) => rest),
+      });
+    }
+
+    // stable sort: biggest dup groups first
+    groups.sort((a, b) => b.count - a.count || a.email.localeCompare(b.email));
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok: true, groups });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/admin/users/:id/delete
+// body: { reason? }
+// Godmode only
+app.post('/api/admin/users/:id/delete', requireUser, requireGodmode, requireEditorOrigin, async (req, res, next) => {
+  try {
+    const userId = String(req.params.id || '').trim();
+    if (!userId) return res.status(400).json({ error: 'bad_user_id' });
+
+    const reason = req.body?.reason != null ? String(req.body.reason) : null;
+
+    const users = await loadUsersMeta();
+    const idx = users.findIndex((u) => u && u.id === userId);
+    if (idx === -1) return res.status(404).json({ error: 'user_not_found' });
+
+    // Prevent deleting space owners (force transfer first)
+    const spaces = await loadSpacesMeta();
+    const owned = (Array.isArray(spaces) ? spaces : []).filter((s) => s && s.status === 'active' && String(s.ownerUserId || '') === userId);
+
+    if (owned.length) {
+      return res.status(409).json({
+        error: 'user_owns_spaces',
+        message: 'Transfer ownership of these spaces before deleting the user.',
+        spaces: owned.map((s) => s.slug),
+      });
+    }
+
+    const nowIso = new Date().toISOString();
+
+    // Revoke all sessions for this user (delete session records)
+    try {
+      const sessions = await loadSessionsMeta();
+      const nextSessions = (Array.isArray(sessions) ? sessions : []).filter((s) => !(s && String(s.userId || '') === userId));
+      await saveSessionsMeta(nextSessions);
+    } catch {}
+
+    // Remove from any space members[] lists (if you’ve started adding ACL)
+    try {
+      const nextSpaces = (Array.isArray(spaces) ? spaces : []).map((s) => {
+        if (!s) return s;
+        if (!Array.isArray(s.members)) return s;
+        const members = s.members.filter((m) => String(m?.userId || '') !== userId);
+        return { ...s, members };
+      });
+      await saveSpacesMeta(nextSpaces);
+    } catch {}
+
+    // Soft-delete user record
+    users[idx] = {
+      ...users[idx],
+      status: 'deleted',
+      deletedAt: nowIso,
+      deletedReason: reason || null,
+      updatedAt: nowIso,
+      // Optional: remove emails from being used for login/verification
+      pendingEmail: null,
+      pendingEmailSetAt: null,
+    };
+
+    await saveUsersMeta(users);
+
+    await appendAdminAudit(req, {
+      action: 'user_deleted_soft',
+      target: { type: 'user', id: userId },
+      detail: { reason: reason || null },
+    });
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok: true, userId, status: 'deleted' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/admin/users/merge
+// body: { sourceUserId, targetUserId, primaryEmail? }
+// Godmode only (safest)
+app.post(
+  '/api/admin/users/merge',
+  requireUser,
+  requireGodmode,
+  requireEditorOrigin,
+  async (req, res, next) => {
+    try {
+      const sourceUserId = String(req.body?.sourceUserId || '').trim();
+      const targetUserId = String(req.body?.targetUserId || '').trim();
+      const primaryEmailIn =
+        req.body?.primaryEmail != null ? normalizeEmail(req.body.primaryEmail) : null;
+
+      if (!sourceUserId || !targetUserId) {
+        return res.status(400).json({ error: 'missing_fields' });
+      }
+      if (sourceUserId === targetUserId) {
+        return res.status(400).json({ error: 'same_user' });
+      }
+
+      const lockKey = `merge:${sourceUserId}->${targetUserId}`;
+      return withInProcessLock(lockKey, async () => {
+        const users = await loadUsersMeta();
+        const arr = Array.isArray(users) ? users : [];
+
+        const sIdx = arr.findIndex((u) => u && u.id === sourceUserId);
+        const tIdx = arr.findIndex((u) => u && u.id === targetUserId);
+
+        if (sIdx === -1) return res.status(404).json({ error: 'source_not_found' });
+        if (tIdx === -1) return res.status(404).json({ error: 'target_not_found' });
+
+        const source = arr[sIdx];
+        let target = arr[tIdx];
+
+        // Guard: avoid merging *into* a deleted user
+        const tStatus = String(target.status || 'active').toLowerCase();
+        if (tStatus === 'deleted') {
+          return res.status(400).json({ error: 'target_deleted' });
+        }
+
+        const nowIso = new Date().toISOString();
+
+        // Choose primary email: explicit param > target primary > target email > source email
+        const targetPrimary = normalizeEmail(target.primaryEmail || target.email);
+        const primaryEmail =
+          primaryEmailIn || targetPrimary || normalizeEmail(source.email) || null;
+
+        // Merge emails (policy A: treat legacy emails as verified if emailVerifiedAt exists)
+        const mergedEmailObjs = [];
+        for (const u of [target, source]) {
+          const emails = getUserEmails(u); // Step 8A helper
+          for (const e of emails) {
+            const em = normalizeEmail(e.email);
+            if (!em) continue;
+
+            const verifiedAt =
+              e.verifiedAt ||
+              (normalizeEmail(u.email) === em && u.emailVerifiedAt ? u.emailVerifiedAt : null) ||
+              null;
+
+            mergedEmailObjs.push({
+              email: em,
+              verifiedAt: verifiedAt || null,
+              source: e.source || 'merge',
+            });
+          }
+        }
+
+        if (primaryEmail) {
+          mergedEmailObjs.push({ email: primaryEmail, verifiedAt: nowIso, source: 'primary' });
+        }
+
+        // De-dupe email entries by keeping the latest verifiedAt
+        const byEmail = new Map();
+        for (const e of mergedEmailObjs) {
+          const em = normalizeEmail(e.email);
+          if (!em) continue;
+
+          const cur = byEmail.get(em);
+          const curMs = cur?.verifiedAt ? Date.parse(cur.verifiedAt) : 0;
+          const nxtMs = e.verifiedAt ? Date.parse(e.verifiedAt) : 0;
+
+          if (!cur || nxtMs > curMs) {
+            byEmail.set(em, {
+              email: em,
+              verifiedAt: e.verifiedAt || null,
+              source: e.source || null,
+            });
+          }
+        }
+
+        const emailsOut = Array.from(byEmail.values());
+
+        // Merge billing conservatively
+        const billing = target.billing || {};
+        const comped = !!(target.billing?.comped || source.billing?.comped);
+        if (comped) billing.comped = true;
+
+        const paidUntilMs = [target, source]
+          .map((u) => Date.parse(u?.billing?.paidUntil || ''))
+          .filter((ms) => Number.isFinite(ms));
+        if (paidUntilMs.length) {
+          billing.paidUntil = new Date(Math.max(...paidUntilMs)).toISOString();
+        }
+
+        const notes = [billing.notes, source.billing?.notes]
+          .filter(Boolean)
+          .map(String);
+        if (notes.length) billing.notes = Array.from(new Set(notes)).join(' | ');
+
+        // Apply to target
+        target = {
+          ...target,
+          billing,
+          emails: emailsOut,
+          primaryEmail: primaryEmail || target.primaryEmail || target.email || null,
+          email: primaryEmail || target.email || null, // legacy primary stays in sync
+          emailVerifiedAt:
+            target.emailVerifiedAt || (primaryEmail ? nowIso : null),
+          pendingEmail: null,
+          pendingEmailSetAt: null,
+          updatedAt: nowIso,
+          mergedFromUserIds: Array.from(
+            new Set([...(target.mergedFromUserIds || []), sourceUserId])
+          ),
+        };
+
+        // Rewrite meta stores: replace sourceUserId -> targetUserId anywhere it appears
+        const replaceMap = new Map([[sourceUserId, targetUserId]]);
+        const rewrite = (obj) => deepReplaceExactString(obj, replaceMap);
+
+        // sessions
+        try {
+          const sessions = await loadSessionsMeta();
+          await saveSessionsMeta(rewrite(sessions));
+        } catch {}
+
+        // spaces
+        try {
+          const spaces = await loadSpacesMeta();
+          const nextSpaces = rewrite(spaces);
+
+          // If any space.ownerEmail matches source email, update to primary
+          const sEmail = normalizeEmail(source.email);
+          if (sEmail && primaryEmail) {
+            for (const sp of nextSpaces) {
+              if (!sp) continue;
+              if (normalizeEmail(sp.ownerEmail) === sEmail) sp.ownerEmail = primaryEmail;
+            }
+          }
+
+          await saveSpacesMeta(nextSpaces);
+        } catch {}
+
+        // workspace requests
+        try {
+          const reqs = await loadWorkspaceRequests();
+          await saveWorkspaceRequests(rewrite(reqs));
+        } catch {}
+
+        // file meta + versions
+        try {
+          const fm = await loadFilesMeta();
+          await saveFilesMeta(rewrite(fm));
+        } catch {}
+        try {
+          const fv = await loadFileVersionsMeta();
+          await saveFileVersionsMeta(rewrite(fv));
+        } catch {}
+
+        // email verify tokens
+        try {
+          const ev = await loadEmailVerifyTokens();
+          await saveEmailVerifyTokens(rewrite(ev));
+        } catch {}
+
+        // Persist users: replace target, remove source
+        arr[tIdx] = target;
+        const nextUsers = arr.filter((u) => !(u && u.id === sourceUserId));
+        await saveUsersMeta(nextUsers);
+
+        await appendAdminAudit(req, {
+          action: 'user_merged',
+          target: { type: 'user', id: targetUserId },
+          detail: {
+            sourceUserId,
+            targetUserId,
+            primaryEmail: target.primaryEmail || target.email || null,
+            verifiedEmails: (target.emails || [])
+              .filter((e) => e?.verifiedAt)
+              .map((e) => e.email),
+          },
+        });
+
+        res.setHeader('Cache-Control', 'no-store');
+        return res.json({ ok: true, targetUserId, removedUserId: sourceUserId });
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 // ───────────────── Admin Audit Log (append-only) ─────────────────
 

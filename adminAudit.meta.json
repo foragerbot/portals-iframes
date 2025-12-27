@@ -1,0 +1,32 @@
+[
+  {
+    "id": "aa_01daaa271df10b47d23d10add2cdcf39",
+    "at": "2025-12-27T15:46:09.907Z",
+    "action": "user_merged",
+    "actor": {
+      "userId": "u_dae6de6c2a725eb602f4e3b8285775d0",
+      "discordId": "884159984093499473",
+      "discordUsername": "southphilly",
+      "discordGlobalName": null,
+      "email": "iamscottking@gmail.com",
+      "ip": "127.0.0.1",
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+    },
+    "target": {
+      "type": "user",
+      "id": "u_dae6de6c2a725eb602f4e3b8285775d0"
+    },
+    "meta": {
+      "method": "POST",
+      "path": "/api/admin/users/merge"
+    },
+    "detail": {
+      "sourceUserId": "u_68b513754f7554aa8d855cc7acf60a80",
+      "targetUserId": "u_dae6de6c2a725eb602f4e3b8285775d0",
+      "primaryEmail": "iamscottking@gmail.com",
+      "verifiedEmails": [
+        "iamscottking@gmail.com"
+      ]
+    }
+  }
+]
