@@ -29,3 +29,8 @@ cookies.txt
 spaces/
 
 workspaceRequests.meta.json
+
+# local-only
+backups/
+runtime_meta/
+merge_users_once.*
