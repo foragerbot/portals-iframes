@@ -27,6 +27,13 @@ import {
   adminCreateSpace,
   adminSendUserEmail,
   adminSearchUsers,
+  adminBillingOverview,
+  adminUpdateUserBilling,
+  adminExtendUserBilling,
+  adminGetAudit,
+  adminGetActivity,
+  adminDoctor,
+  adminListEmailTemplates
 } from './api.js';
 
 import ReactMarkdown from 'react-markdown';
@@ -1494,9 +1501,7 @@ function SpaceEditor({
       }
     },
     [slug]
-  );
-
-  
+  );  
 
   useEffect(() => {
     loadFiles();
@@ -3504,41 +3509,14 @@ const handleRequestWorkspace = async () => {
 function AdminDashboard() {
   const navigate = useNavigate();
 
-  // ---- global status ----
+  // ───────────────── Global ─────────────────
   const [booting, setBooting] = useState(true);
   const [forbidden, setForbidden] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
 
-  // ---- workspace requests ----
-  const [reqStatusFilter, setReqStatusFilter] = useState('pending'); // pending|approved|rejected|all
-  const [requests, setRequests] = useState([]);
-  const [requestsLoading, setRequestsLoading] = useState(false);
+  const [tab, setTab] = useState('activity'); // activity | requests | billing | create | email | audit
 
-  // inline slug editing per request
-  const [slugEdits, setSlugEdits] = useState({});   // { [requestId]: currentSlug }
-  const [slugErrors, setSlugErrors] = useState({}); // { [requestId]: errorMessage | null }
-
-  // ---- user search (shared) ----
-  const [userQuery, setUserQuery] = useState('');
-  const [userResults, setUserResults] = useState([]);
-  const [userSearching, setUserSearching] = useState(false);
-
-  // ---- create space ----
-  const [createSlug, setCreateSlug] = useState('');
-  const [createQuotaMb, setCreateQuotaMb] = useState(100);
-  const [createOwnerUser, setCreateOwnerUser] = useState(null); // user object
-  const [creatingSpace, setCreatingSpace] = useState(false);
-
-  // ---- send email ----
-  const [emailUser, setEmailUser] = useState(null); // user object
-  const [emailSubject, setEmailSubject] = useState('');
-  const [emailBody, setEmailBody] = useState('');
-  const [emailAsHtml, setEmailAsHtml] = useState(false);
-  const [emailFrom, setEmailFrom] = useState('');
-  const [sendingEmail, setSendingEmail] = useState(false);
-
-  // ---- helpers ----
   const setAuthErrorFrom = (err) => {
     if (err?.status === 401) {
       navigate('/login', { replace: true, state: { from: '/admin' } });
@@ -3560,26 +3538,113 @@ function AdminDashboard() {
     return u.id || '';
   };
 
-  const suggestSlugFromUser = (u) => {
-    const raw =
-      (u?.discordUsername ? u.discordUsername : '') ||
-      (u?.discordGlobalName ? u.discordGlobalName : '') ||
-      (u?.email ? String(u.email).split('@')[0] : '') ||
-      '';
-    // normalizeSlug is your helper (a-z0-9- etc)
-    return normalizeSlug(raw);
+  const fmtWhen = (iso) => {
+    if (!iso) return '—';
+    try {
+      return new Date(iso).toLocaleString();
+    } catch {
+      return String(iso);
+    }
   };
+
+  const fmtDateInput = (iso) => {
+    if (!iso) return '';
+    try {
+      return new Date(iso).toISOString().slice(0, 10);
+    } catch {
+      return '';
+    }
+  };
+
+  const dateInputToIsoOrNull = (yyyyMmDd) => {
+    const s = String(yyyyMmDd || '').trim();
+    if (!s) return null;
+    const ms = Date.parse(s);
+    if (!Number.isFinite(ms)) return null;
+    return new Date(ms).toISOString();
+  };
+
+const extractUserId = (obj) => {
+  const target = obj?.target || null;
+  if (!target) return null;
+
+  const candidate =
+    target.userId ||
+    (target.type === 'user' ? target.id : null) ||
+    (target.type === 'workspace_request' ? target.userId : null) ||
+    null;
+
+  return candidate ? String(candidate) : null;
+};
+
+  // ───────────────── Activity ─────────────────
+  const [activityLoading, setActivityLoading] = useState(false);
+  const [activityItems, setActivityItems] = useState([]);
+  const [activityLimit, setActivityLimit] = useState(200);
+  const [activityQ, setActivityQ] = useState('');
+
+  const loadActivity = useCallback(async () => {
+    setActivityLoading(true);
+    setErrorMsg('');
+    try {
+      const data = await adminGetActivity({ limit: activityLimit });
+      setActivityItems(Array.isArray(data?.items) ? data.items : []);
+      setStatusMsg(`Loaded activity (${Array.isArray(data?.items) ? data.items.length : 0}).`);
+    } catch (err) {
+      console.error(err);
+      if (setAuthErrorFrom(err)) return;
+      setErrorMsg(err.payload?.message || err.payload?.error || 'Failed to load activity feed.');
+    } finally {
+      setActivityLoading(false);
+    }
+  }, [activityLimit]);
+
+  const filteredActivity = useMemo(() => {
+    const q = String(activityQ || '').trim().toLowerCase();
+    if (!q) return activityItems;
+
+    const hay = (x) => {
+      const actor = x.actor || {};
+      const target = x.target || {};
+      const detail = x.detail || {};
+      return [
+        x.kind,
+        x.action,
+        x.at,
+        actor.discordUsername,
+        actor.discordId,
+        actor.userId,
+        actor.email,
+        target.type,
+        target.id,
+        target.slug,
+        target.userId,
+        target.email,
+        JSON.stringify(detail),
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+    };
+
+    return activityItems.filter((x) => hay(x).includes(q));
+  }, [activityItems, activityQ]);
+
+  // ───────────────── Requests ─────────────────
+  const [reqStatusFilter, setReqStatusFilter] = useState('pending');
+  const [requests, setRequests] = useState([]);
+  const [requestsLoading, setRequestsLoading] = useState(false);
+  const [slugEdits, setSlugEdits] = useState({});
+  const [slugErrors, setSlugErrors] = useState({});
 
   const loadRequests = useCallback(async () => {
     setRequestsLoading(true);
     setErrorMsg('');
-    setStatusMsg('');
     try {
       const data = await adminGetSpaceRequests(reqStatusFilter);
-      const reqs = data?.requests || [];
+      const reqs = Array.isArray(data?.requests) ? data.requests : [];
       setRequests(reqs);
 
-      // initialize slug inputs for each request (prefer suggestedSlug, then discord username)
       setSlugEdits((prev) => {
         const next = { ...prev };
         for (const r of reqs) {
@@ -3587,8 +3652,7 @@ function AdminDashboard() {
 
           const fromDiscord =
             r.discordUsername ? normalizeSlug(r.discordUsername) :
-            r.discordGlobalName ? normalizeSlug(r.discordGlobalName) :
-            '';
+            r.discordGlobalName ? normalizeSlug(r.discordGlobalName) : '';
 
           const fromSuggested = r.suggestedSlug ? normalizeSlug(r.suggestedSlug) : '';
           const fromEmail = r.email ? normalizeSlug(String(r.email).split('@')[0]) : '';
@@ -3599,7 +3663,7 @@ function AdminDashboard() {
       });
 
       setSlugErrors({});
-      setStatusMsg(`Loaded ${reqs.length || 0} request(s): ${reqStatusFilter}.`);
+      setStatusMsg(`Loaded requests (${reqs.length}).`);
     } catch (err) {
       console.error(err);
       if (setAuthErrorFrom(err)) return;
@@ -3608,47 +3672,6 @@ function AdminDashboard() {
       setRequestsLoading(false);
     }
   }, [reqStatusFilter]);
-
-  // boot
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        await loadRequests();
-      } finally {
-        if (mounted) setBooting(false);
-      }
-    })();
-    return () => { mounted = false; };
-  }, [loadRequests]);
-
-  // user search (debounced)
-  useEffect(() => {
-    let alive = true;
-    const q = String(userQuery || '').trim();
-
-    const t = setTimeout(async () => {
-      setUserSearching(true);
-      try {
-        const data = await adminSearchUsers(q, 25);
-        if (!alive) return;
-        setUserResults(data?.users || []);
-      } catch (err) {
-        console.error(err);
-        if (setAuthErrorFrom(err)) return;
-        if (!alive) return;
-        // don’t spam error UI for search; just clear results
-        setUserResults([]);
-      } finally {
-        if (alive) setUserSearching(false);
-      }
-    }, 250);
-
-    return () => {
-      alive = false;
-      clearTimeout(t);
-    };
-  }, [userQuery]);
 
   const handleSlugChange = (reqId, rawInput) => {
     const normalized = normalizeSlug(rawInput);
@@ -3675,60 +3698,143 @@ function AdminDashboard() {
     const fromSuggested = req.suggestedSlug ? normalizeSlug(req.suggestedSlug) : '';
     const fromDiscord =
       req.discordUsername ? normalizeSlug(req.discordUsername) :
-      req.discordGlobalName ? normalizeSlug(req.discordGlobalName) :
-      '';
+      req.discordGlobalName ? normalizeSlug(req.discordGlobalName) : '';
     const fromEmail = req.email ? normalizeSlug(String(req.email).split('@')[0]) : '';
     return fromSuggested || fromDiscord || fromEmail;
   };
 
-  const handleApprove = async (reqId, quotaMbOverride = null) => {
-    const req = requests.find((r) => r.id === reqId);
-    if (!req) return;
+  // ───────────────── Billing ─────────────────
+  const [billingLoading, setBillingLoading] = useState(false);
+  const [billingCounts, setBillingCounts] = useState(null);
+  const [billingUsers, setBillingUsers] = useState([]);
+  const [billingFilter, setBillingFilter] = useState('all'); // all | comped | paid | unpaid | expiringSoon | inactive
+  const [billingEdits, setBillingEdits] = useState({});
+  const [billingSaving, setBillingSaving] = useState({}); // userId -> bool
 
-    const slug = normalizeSlug(getSlugForRequest(req));
-    if (!slug || !isValidSlug(slug)) {
-      setSlugErrors((prev) => ({ ...prev, [reqId]: 'Slug must be 3–32 chars (a–z, 0–9, hyphen).' }));
-      return;
-    }
-
-    const quotaMb = Number.isFinite(Number(quotaMbOverride)) ? Number(quotaMbOverride) : 100;
-
+  const loadBilling = useCallback(async () => {
+    setBillingLoading(true);
+    setErrorMsg('');
     try {
-      setErrorMsg('');
-      setStatusMsg(`Approving ${req.email || req.discordUsername || req.userId}…`);
-      await adminApproveSpaceRequest(reqId, { slug, quotaMb });
-      setRequests((prev) => prev.filter((r) => r.id !== reqId));
-      setStatusMsg(`Approved request → space "${slug}" (${quotaMb} MB).`);
+      const data = await adminBillingOverview();
+      const users = Array.isArray(data?.users) ? data.users : [];
+      setBillingCounts(data?.counts || null);
+      setBillingUsers(users);
+
+      setBillingEdits((prev) => {
+        const next = { ...prev };
+        for (const u of users) {
+          if (next[u.id]) continue;
+          next[u.id] = {
+            comped: !!u?.billing?.comped,
+            paidUntil: u?.billing?.paidUntil || null,
+            tier: u?.billing?.tier || '',
+            notes: u?.billing?.notes || '',
+            status: u?.status || 'active',
+          };
+        }
+        return next;
+      });
+
+      setStatusMsg('Loaded billing.');
     } catch (err) {
       console.error(err);
       if (setAuthErrorFrom(err)) return;
+      setErrorMsg(err.payload?.message || err.payload?.error || 'Failed to load billing.');
+    } finally {
+      setBillingLoading(false);
+    }
+  }, []);
 
-      const code = err.payload?.error;
-      if (err.status === 409 && (code === 'space_exists' || code === 'dir_exists')) {
-        setSlugErrors((prev) => ({ ...prev, [reqId]: err.payload?.message || 'Slug already in use.' }));
-      } else {
-        setErrorMsg(err.payload?.message || err.payload?.error || 'Failed to approve request.');
-      }
+  const filteredBillingUsers = useMemo(() => {
+    const arr = Array.isArray(billingUsers) ? billingUsers : [];
+    if (billingFilter === 'all') return arr;
+
+    return arr.filter((u) => {
+      const ent = u.entitlement || {};
+      if (billingFilter === 'comped') return !!ent.isComped && !!ent.isActive;
+      if (billingFilter === 'paid') return !ent.isComped && !!ent.isPaid;
+      if (billingFilter === 'unpaid') return !!ent.isActive && !ent.isPaid;
+      if (billingFilter === 'expiringSoon') return !!ent.expiringSoon;
+      if (billingFilter === 'inactive') return !ent.isActive;
+      return true;
+    });
+  }, [billingUsers, billingFilter]);
+
+  const setBillingField = (userId, field, value) => {
+    setBillingEdits((prev) => ({
+      ...prev,
+      [userId]: { ...(prev[userId] || {}), [field]: value },
+    }));
+  };
+
+  const quickCompIndefinitely = async (u) => {
+    const ok = window.confirm(`Comp ${bestHandle(u)} indefinitely?`);
+    if (!ok) return;
+
+    setBillingSaving((p) => ({ ...p, [u.id]: true }));
+    try {
+      await adminUpdateUserBilling(u.id, { comped: true, status: 'active' });
+      await Promise.all([loadBilling(), loadAudit(), loadActivity()]);
+      setStatusMsg('Comped indefinitely.');
+    } catch (err) {
+      console.error(err);
+      if (setAuthErrorFrom(err)) return;
+      setErrorMsg(err.payload?.message || err.payload?.error || 'Failed to comp user.');
+    } finally {
+      setBillingSaving((p) => ({ ...p, [u.id]: false }));
     }
   };
 
-  const handleReject = async (reqId) => {
-    const req = requests.find((r) => r.id === reqId);
-    if (!req) return;
-
-    const reason = window.prompt('Optional reason for rejection:', '') || '';
-
+  const quickExtend30 = async (u) => {
+    setBillingSaving((p) => ({ ...p, [u.id]: true }));
     try {
-      setErrorMsg('');
-      setStatusMsg('Rejecting request…');
-      await adminRejectSpaceRequest(reqId, reason || null);
-      setRequests((prev) => prev.filter((r) => r.id !== reqId));
-      setStatusMsg('Rejected request.');
+      await adminExtendUserBilling(u.id, 30);
+      await Promise.all([loadBilling(), loadAudit(), loadActivity()]);
+      setStatusMsg('Extended 30 days.');
     } catch (err) {
       console.error(err);
       if (setAuthErrorFrom(err)) return;
-      setErrorMsg(err.payload?.message || err.payload?.error || 'Failed to reject request.');
+      setErrorMsg(err.payload?.message || err.payload?.error || 'Failed to extend.');
+    } finally {
+      setBillingSaving((p) => ({ ...p, [u.id]: false }));
     }
+  };
+
+  const saveBillingRow = async (u) => {
+    const patch = billingEdits[u.id] || {};
+    setBillingSaving((p) => ({ ...p, [u.id]: true }));
+    try {
+      await adminUpdateUserBilling(u.id, {
+        comped: !!patch.comped,
+        paidUntil: patch.paidUntil ?? null,
+        tier: String(patch.tier || '').trim() || null,
+        notes: String(patch.notes || '').trim() || null,
+        status: String(patch.status || u.status || 'active').toLowerCase(),
+      });
+      await Promise.all([loadBilling(), loadAudit(), loadActivity()]);
+      setStatusMsg(`Saved billing for ${bestHandle(u)}.`);
+    } catch (err) {
+      console.error(err);
+      if (setAuthErrorFrom(err)) return;
+      setErrorMsg(err.payload?.message || err.payload?.error || 'Failed to save billing.');
+    } finally {
+      setBillingSaving((p) => ({ ...p, [u.id]: false }));
+    }
+  };
+
+  // ───────────────── Create Space ─────────────────
+  const [createSlug, setCreateSlug] = useState('');
+  const [createQuotaMb, setCreateQuotaMb] = useState(100);
+  const [createOwnerUser, setCreateOwnerUser] = useState(null);
+  const [creatingSpace, setCreatingSpace] = useState(false);
+
+  const suggestSlugFromUser = (u) => {
+    const raw =
+      (u?.discordUsername ? u.discordUsername : '') ||
+      (u?.discordGlobalName ? u.discordGlobalName : '') ||
+      (u?.email ? String(u.email).split('@')[0] : '') ||
+      '';
+    return normalizeSlug(raw);
   };
 
   const handlePickOwnerForCreate = (u) => {
@@ -3750,19 +3856,16 @@ function AdminDashboard() {
       setCreatingSpace(true);
       setErrorMsg('');
       setStatusMsg('Creating space…');
-
       const data = await adminCreateSpace({
         slug,
         quotaMb: Number(createQuotaMb) || 100,
         ownerUserId: createOwnerUser?.id || null,
-        // ownerEmail is optional; prefer ownerUserId
         ownerEmail: null,
       });
-
       setStatusMsg(`Created space "${data?.space?.slug || slug}".`);
-      // reset minimal fields
       setCreateSlug('');
       setCreateOwnerUser(null);
+      await Promise.all([loadBilling(), loadAudit(), loadActivity()]);
     } catch (err) {
       console.error(err);
       if (setAuthErrorFrom(err)) return;
@@ -3772,10 +3875,15 @@ function AdminDashboard() {
     }
   };
 
-  const handlePickEmailUser = (u) => {
-    setEmailUser(u);
-    // convenience: if empty from/subject, don’t overwrite; otherwise leave as-is
-  };
+  // ───────────────── Send Email ─────────────────
+  const [emailUser, setEmailUser] = useState(null);
+  const [emailSubject, setEmailSubject] = useState('');
+  const [emailBody, setEmailBody] = useState('');
+  const [emailAsHtml, setEmailAsHtml] = useState(false);
+  const [emailFrom, setEmailFrom] = useState('');
+  const [sendingEmail, setSendingEmail] = useState(false);
+
+  const handlePickEmailUser = (u) => setEmailUser(u);
 
   const handleSendEmail = async () => {
     if (!emailUser?.id) {
@@ -3804,6 +3912,7 @@ function AdminDashboard() {
       });
 
       setStatusMsg(`Sent email to ${bestHandle(emailUser)}.`);
+      await Promise.all([loadAudit(), loadActivity()]);
     } catch (err) {
       console.error(err);
       if (setAuthErrorFrom(err)) return;
@@ -3813,6 +3922,666 @@ function AdminDashboard() {
     }
   };
 
+  // ───────────────── Audit ─────────────────
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditEntries, setAuditEntries] = useState([]);
+  const [auditQ, setAuditQ] = useState('');
+  const [auditActor, setAuditActor] = useState('');
+  const [auditAction, setAuditAction] = useState('');
+  const [auditLimit, setAuditLimit] = useState(200);
+
+  const loadAudit = useCallback(async () => {
+    setAuditLoading(true);
+    setErrorMsg('');
+    try {
+      const data = await adminGetAudit({
+        limit: auditLimit,
+        q: auditQ.trim(),
+        actor: auditActor.trim(),
+        action: auditAction.trim(),
+      });
+      setAuditEntries(Array.isArray(data?.entries) ? data.entries : []);
+      setStatusMsg(`Loaded audit (${Array.isArray(data?.entries) ? data.entries.length : 0}).`);
+    } catch (err) {
+      console.error(err);
+      if (setAuthErrorFrom(err)) return;
+      setErrorMsg(err.payload?.message || err.payload?.error || 'Failed to load audit log.');
+    } finally {
+      setAuditLoading(false);
+    }
+  }, [auditLimit, auditQ, auditActor, auditAction]);
+
+    // ───────────────── Boot ─────────────────
+useEffect(() => {
+  let alive = true;
+
+  (async () => {
+    try {
+      // Don’t let one failure block boot completion
+      await Promise.allSettled([
+        loadActivity(),
+        loadRequests(),
+        loadBilling(),
+        loadAudit(),
+      ]);
+    } finally {
+      if (alive) setBooting(false);
+    }
+  })();
+
+  return () => {
+    alive = false;
+  };
+}, [loadActivity, loadRequests, loadBilling, loadAudit]);
+
+
+
+  // ───────────────── Sessions modal ─────────────────
+  const [sessionsOpen, setSessionsOpen] = useState(false);
+  const [sessionsUser, setSessionsUser] = useState(null);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionsList, setSessionsList] = useState([]);
+  const [sessionsError, setSessionsError] = useState('');
+  const [revokingSid, setRevokingSid] = useState(''); // sid or '__all__'
+
+  const openSessionsModal = useCallback(async (userObjOrId) => {
+    const u =
+      typeof userObjOrId === 'string'
+        ? ({ id: userObjOrId })
+        : (userObjOrId || null);
+
+    const userId = u?.id ? String(u.id) : null;
+    if (!userId) return;
+
+    setSessionsUser(u);
+    setSessionsOpen(true);
+    setSessionsError('');
+    setSessionsList([]);
+    setRevokingSid('');
+    setSessionsLoading(true);
+
+    try {
+      const data = await adminGetUserSessions(userId, { limit: 50 });
+      setSessionsList(Array.isArray(data?.sessions) ? data.sessions : []);
+    } catch (err) {
+      console.error(err);
+      if (setAuthErrorFrom(err)) return;
+      setSessionsError(err.payload?.message || err.payload?.error || 'Failed to load sessions.');
+    } finally {
+      setSessionsLoading(false);
+    }
+  }, []);
+
+  const closeSessionsModal = useCallback(() => {
+    if (sessionsLoading || !!revokingSid) return;
+    setSessionsOpen(false);
+  }, [sessionsLoading, revokingSid]);
+
+  const refreshSessions = useCallback(async () => {
+    const userId = sessionsUser?.id ? String(sessionsUser.id) : null;
+    if (!userId) return;
+
+    setSessionsLoading(true);
+    setSessionsError('');
+    try {
+      const data = await adminGetUserSessions(userId, { limit: 50 });
+      setSessionsList(Array.isArray(data?.sessions) ? data.sessions : []);
+    } catch (err) {
+      console.error(err);
+      if (setAuthErrorFrom(err)) return;
+      setSessionsError(err.payload?.message || err.payload?.error || 'Failed to load sessions.');
+    } finally {
+      setSessionsLoading(false);
+    }
+  }, [sessionsUser]);
+
+  const revokeAllSessions = useCallback(async () => {
+    const userId = sessionsUser?.id ? String(sessionsUser.id) : null;
+    if (!userId) return;
+
+    const label = bestHandle(sessionsUser) || userId;
+    const ok = window.confirm(`Revoke ALL sessions for ${label}? They will be logged out everywhere.`);
+    if (!ok) return;
+
+    setRevokingSid('__all__');
+    setSessionsError('');
+    try {
+      await adminRevokeUserSessions(userId, {});
+      await Promise.all([refreshSessions(), loadAudit(), loadActivity()]);
+      setStatusMsg('Revoked all sessions.');
+    } catch (err) {
+      console.error(err);
+      if (setAuthErrorFrom(err)) return;
+      setSessionsError(err.payload?.message || err.payload?.error || 'Failed to revoke all sessions.');
+    } finally {
+      setRevokingSid('');
+    }
+  }, [sessionsUser, refreshSessions, loadAudit, loadActivity]);
+
+  const revokeOneSession = useCallback(async (sid) => {
+    const userId = sessionsUser?.id ? String(sessionsUser.id) : null;
+    if (!userId || !sid) return;
+
+    const ok = window.confirm(`Revoke this session?\n\n${sid}`);
+    if (!ok) return;
+
+    setRevokingSid(sid);
+    setSessionsError('');
+    try {
+      await adminRevokeUserSessions(userId, { sid });
+      await Promise.all([refreshSessions(), loadAudit(), loadActivity()]);
+      setStatusMsg('Revoked session.');
+    } catch (err) {
+      console.error(err);
+      if (setAuthErrorFrom(err)) return;
+      setSessionsError(err.payload?.message || err.payload?.error || 'Failed to revoke session.');
+    } finally {
+      setRevokingSid('');
+    }
+  }, [sessionsUser, refreshSessions, loadAudit, loadActivity]);
+
+
+
+  // ───────────────── User Drawer ─────────────────
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [drawerUserId, setDrawerUserId] = useState(null);
+  const [drawerUser, setDrawerUser] = useState(null);
+  const [drawerLoading, setDrawerLoading] = useState(false);
+  const [drawerError, setDrawerError] = useState('');
+
+  const findUserInCache = useCallback((userId) => {
+    const id = String(userId || '').trim();
+    if (!id) return null;
+    const arr = Array.isArray(billingUsers) ? billingUsers : [];
+    return arr.find((u) => u && String(u.id || '') === id) || null;
+  }, [billingUsers]);
+
+  const openUserDrawer = useCallback(async (userId) => {
+    const id = String(userId || '').trim();
+    if (!id) return;
+
+    setDrawerOpen(true);
+    setDrawerUserId(id);
+    setDrawerError('');
+    setDrawerUser(null);
+    setDrawerLoading(true);
+
+    // Try cache first (billing overview)
+    const cached = findUserInCache(id);
+    if (cached) {
+      setDrawerUser(cached);
+      setDrawerLoading(false);
+      return;
+    }
+
+    try {
+      const data = await adminGetUserDetail(id);
+      setDrawerUser(data?.user || null);
+    } catch (err) {
+      console.error(err);
+      if (setAuthErrorFrom(err)) return;
+      setDrawerError(err.payload?.message || err.payload?.error || 'Failed to load user.');
+    } finally {
+      setDrawerLoading(false);
+    }
+  }, [findUserInCache]);
+
+  const closeUserDrawer = useCallback(() => {
+    if (drawerLoading) return;
+    setDrawerOpen(false);
+  }, [drawerLoading]);
+
+  // ───────────────── User search (Create + Email) ─────────────────
+  const [userQuery, setUserQuery] = useState('');
+  const [userResults, setUserResults] = useState([]);
+  const [userSearching, setUserSearching] = useState(false);
+
+  useEffect(() => {
+    const shouldSearch = tab === 'create' || tab === 'email';
+    if (!shouldSearch) return;
+
+    let alive = true;
+    const q = String(userQuery || '').trim();
+
+    const t = setTimeout(async () => {
+      if (!q) {
+        setUserResults([]);
+        return;
+      }
+      setUserSearching(true);
+      try {
+        const data = await adminSearchUsers(q, 25);
+        if (!alive) return;
+        setUserResults(Array.isArray(data?.users) ? data.users : []);
+      } catch (err) {
+        console.error(err);
+        if (setAuthErrorFrom(err)) return;
+        if (!alive) return;
+        setUserResults([]);
+      } finally {
+        if (alive) setUserSearching(false);
+      }
+    }, 250);
+
+    return () => {
+      alive = false;
+      clearTimeout(t);
+    };
+  }, [userQuery, tab]);
+
+// ───────────────── Doctor ─────────────────
+const [doctorLoading, setDoctorLoading] = useState(false);
+const [doctorData, setDoctorData] = useState(null);
+const [doctorError, setDoctorError] = useState('');
+
+const loadDoctor = useCallback(async () => {
+  setDoctorLoading(true);
+  setDoctorError('');
+  setErrorMsg('');
+
+  try {
+    const data = await adminDoctor();
+    setDoctorData(data);
+    setStatusMsg('Doctor loaded.');
+  } catch (err) {
+    console.error(err);
+    if (setAuthErrorFrom(err)) return;
+    setDoctorError(err.payload?.message || err.payload?.error || 'Failed to load doctor.');
+  } finally {
+    setDoctorLoading(false);
+  }
+}, []);
+
+useEffect(() => {
+  if (tab !== 'doctor') return;
+  if (!doctorData && !doctorLoading) loadDoctor();
+}, [tab, doctorData, doctorLoading, loadDoctor]);
+
+// ───────────────── Email templates ─────────────────
+const [tplLoading, setTplLoading] = useState(false);
+const [tplError, setTplError] = useState('');
+const [templates, setTemplates] = useState([]);
+const [tplQuery, setTplQuery] = useState('');
+const [activeTplId, setActiveTplId] = useState(null);
+const [tplDraft, setTplDraft] = useState({
+  id: null,
+  name: '',
+  subject: '',
+  mode: 'text', // text|html|both
+  text: '',
+  html: '',
+});
+const [tplDirty, setTplDirty] = useState(false);
+const [tplSaving, setTplSaving] = useState(false);
+const [tplDeleting, setTplDeleting] = useState(false);
+
+// Sending
+const [tplSendQuery, setTplSendQuery] = useState('');
+const [tplSendSearching, setTplSendSearching] = useState(false);
+const [tplSendResults, setTplSendResults] = useState([]);
+const [tplSendUser, setTplSendUser] = useState(null);
+const [tplSendSpaceSlug, setTplSendSpaceSlug] = useState('');
+const [tplSending, setTplSending] = useState(false);
+const [tplSendStatus, setTplSendStatus] = useState('');
+const [tplLoadedOnce, setTplLoadedOnce] = useState(false);
+
+const loadTemplates = useCallback(async () => {
+  setTplLoading(true);
+  // NOTE: don't clear tplError here if you want errors to stay visible during auto-load
+
+  try {
+    const data = await adminListEmailTemplates();
+    const list = Array.isArray(data?.templates) ? data.templates : [];
+    setTemplates(list);
+
+    // Auto-select if nothing selected OR selected template disappeared
+    const exists = activeTplId && list.some((t) => t?.id === activeTplId);
+
+    if ((!activeTplId || !exists) && list.length) {
+      const first = list[0];
+      setActiveTplId(first.id);
+      setTplDraft({
+        id: first.id,
+        name: first.name || '',
+        subject: first.subject || '',
+        mode: first.mode || 'text',
+        text: first.text || '',
+        html: first.html || '',
+      });
+      setTplDirty(false);
+    }
+
+    // If list is empty, keep draft as-is (lets you create a new template)
+  } catch (err) {
+    console.error(err);
+    if (setAuthErrorFrom(err)) return;
+    setTplError(
+      err.payload?.message ||
+        err.payload?.error ||
+        'Failed to load templates.'
+    );
+  } finally {
+    setTplLoading(false);
+    setTplLoadedOnce(true); // ✅ prevents infinite retry loops
+  }
+}, [activeTplId]);
+
+useEffect(() => {
+  if (tab !== 'templates') return;
+  if (tplLoadedOnce) return;
+  if (tplLoading) return;
+  loadTemplates();
+}, [tab, tplLoadedOnce, tplLoading, loadTemplates]);
+
+const selectTemplate = (tpl) => {
+  if (!tpl) return;
+
+  if (tplDirty) {
+    const ok = window.confirm(
+      'You have unsaved changes. Discard them and switch templates?'
+    );
+    if (!ok) return;
+  }
+
+  setActiveTplId(tpl.id);
+  setTplDraft({
+    id: tpl.id,
+    name: tpl.name || '',
+    subject: tpl.subject || '',
+    mode: tpl.mode || 'text',
+    text: tpl.text || '',
+    html: tpl.html || '',
+  });
+  setTplDirty(false);
+
+  // ✅ Reset “send” state so you don’t accidentally send the new template
+  // to the previous recipient.
+  setTplSendStatus('');
+  setTplSendUser(null);
+  setTplSendQuery('');
+  setTplSendResults([]);
+};
+
+const setDraftField = (k, v) => {
+  setTplDraft((prev) => ({ ...prev, [k]: v }));
+  setTplDirty(true);
+};
+
+const newTemplate = () => {
+  if (tplDirty) {
+    const ok = window.confirm(
+      'Discard unsaved changes and create a new template draft?'
+    );
+    if (!ok) return;
+  }
+
+  setActiveTplId(null);
+  setTplDraft({
+    id: null,
+    name: '',
+    subject: '',
+    mode: 'text',
+    text: '',
+    html: '',
+  });
+  setTplDirty(true);
+
+  // Reset send UI
+  setTplSendStatus('');
+  setTplSendUser(null);
+  setTplSendQuery('');
+  setTplSendResults([]);
+  setTplSendSpaceSlug('');
+};
+
+const saveTemplate = async () => {
+  const name = String(tplDraft.name || '').trim();
+  const subject = String(tplDraft.subject || '').trim();
+  const mode = String(tplDraft.mode || 'text')
+    .trim()
+    .toLowerCase(); // text|html|both
+  const text = String(tplDraft.text || '');
+  const html = String(tplDraft.html || '');
+
+  if (!name) return setTplError('Template name is required.');
+  if (!subject) return setTplError('Subject is required.');
+
+  if (mode === 'text' && !text.trim()) {
+    return setTplError('Text body is required for mode=text.');
+  }
+  if (mode === 'html' && !html.trim()) {
+    return setTplError('HTML body is required for mode=html.');
+  }
+  if (mode === 'both' && !text.trim() && !html.trim()) {
+    return setTplError('Provide at least one body for mode=both.');
+  }
+
+  setTplSaving(true);
+  setTplError('');
+
+  try {
+    if (!tplDraft.id) {
+      const data = await adminCreateEmailTemplate({
+        name,
+        subject,
+        mode,
+        text,
+        html,
+      });
+
+      const created = data?.template || null;
+
+      // Reload list and select newly created if returned
+      await loadTemplates();
+
+      if (created?.id) {
+        setActiveTplId(created.id);
+        setTplDraft({
+          id: created.id,
+          name: created.name || '',
+          subject: created.subject || '',
+          mode: created.mode || 'text',
+          text: created.text || '',
+          html: created.html || '',
+        });
+      }
+
+      setTplDirty(false);
+    } else {
+      await adminUpdateEmailTemplate(tplDraft.id, {
+        name,
+        subject,
+        mode,
+        text,
+        html,
+      });
+
+      await loadTemplates();
+      setTplDirty(false);
+    }
+
+    setTplSendStatus('Saved.');
+
+    // Optional: refresh logs if you have these funcs
+    try {
+      await Promise.all([loadAudit?.(), loadActivity?.()]);
+    } catch {}
+  } catch (err) {
+    console.error(err);
+    if (setAuthErrorFrom(err)) return;
+    setTplError(
+      err.payload?.message ||
+        err.payload?.error ||
+        'Failed to save template.'
+    );
+  } finally {
+    setTplSaving(false);
+  }
+};
+
+const deleteTemplate = async () => {
+  if (!tplDraft.id) return;
+
+  const ok = window.confirm(
+    `Delete template "${tplDraft.name}"? This cannot be undone.`
+  );
+  if (!ok) return;
+
+  setTplDeleting(true);
+  setTplError('');
+
+  try {
+    await adminDeleteEmailTemplate(tplDraft.id);
+
+    // Clear selection before reload so auto-select works
+    setActiveTplId(null);
+    setTplDraft({ id: null, name: '', subject: '', mode: 'text', text: '', html: '' });
+    setTplDirty(false);
+
+    setTplSendStatus('Deleted.');
+    setTplSendUser(null);
+    setTplSendQuery('');
+    setTplSendResults([]);
+    setTplSendSpaceSlug('');
+
+    // Allow auto-select again after delete
+    setTplLoadedOnce(false);
+
+    await loadTemplates();
+
+    try {
+      await Promise.all([loadAudit?.(), loadActivity?.()]);
+    } catch {}
+  } catch (err) {
+    console.error(err);
+    if (setAuthErrorFrom(err)) return;
+    setTplError(
+      err.payload?.message ||
+        err.payload?.error ||
+        'Failed to delete template.'
+    );
+  } finally {
+    setTplDeleting(false);
+  }
+};
+
+// Recipient search for "Send using template"
+useEffect(() => {
+  if (tab !== 'templates') return;
+
+  let alive = true;
+  const q = String(tplSendQuery || '').trim();
+
+  const t = setTimeout(async () => {
+    if (!q) {
+      setTplSendResults([]);
+      return;
+    }
+
+    setTplSendSearching(true);
+    try {
+      const data = await adminSearchUsers(q, 25);
+      if (!alive) return;
+      setTplSendResults(Array.isArray(data?.users) ? data.users : []);
+    } catch (err) {
+      console.error(err);
+      if (setAuthErrorFrom(err)) return;
+      if (!alive) return;
+      setTplSendResults([]);
+    } finally {
+      if (alive) setTplSendSearching(false);
+    }
+  }, 250);
+
+  return () => {
+    alive = false;
+    clearTimeout(t);
+  };
+}, [tab, tplSendQuery]);
+
+const sendTemplate = async () => {
+  if (!tplDraft.id) return setTplError('Save the template before sending.');
+  if (!tplSendUser?.id) return setTplError('Pick a recipient user.');
+
+  setTplSending(true);
+  setTplError('');
+
+  try {
+    await adminSendEmailTemplate(tplDraft.id, {
+      userId: tplSendUser.id,
+      spaceSlug: String(tplSendSpaceSlug || '').trim() || null,
+    });
+
+    setTplSendStatus('Sent.');
+
+    try {
+      await Promise.all([loadAudit?.(), loadActivity?.()]);
+    } catch {}
+  } catch (err) {
+    console.error(err);
+    if (setAuthErrorFrom(err)) return;
+    setTplError(
+      err.payload?.message ||
+        err.payload?.error ||
+        'Failed to send template.'
+    );
+  } finally {
+    setTplSending(false);
+  }
+};
+
+
+
+  // ───────────────── Requests actions (depends on billing/audit/activity) ─────────────────
+  const handleApprove = async (reqId, quotaMbOverride = 100) => {
+    const req = requests.find((r) => r.id === reqId);
+    if (!req) return;
+
+    const slug = normalizeSlug(getSlugForRequest(req));
+    if (!slug || !isValidSlug(slug)) {
+      setSlugErrors((prev) => ({ ...prev, [reqId]: 'Slug must be 3–32 chars (a–z, 0–9, hyphen).' }));
+      return;
+    }
+
+    const quotaMb = Number.isFinite(Number(quotaMbOverride)) ? Number(quotaMbOverride) : 100;
+
+    try {
+      setErrorMsg('');
+      setStatusMsg('Approving…');
+      await adminApproveSpaceRequest(reqId, { slug, quotaMb });
+      setRequests((prev) => prev.filter((r) => r.id !== reqId));
+      setStatusMsg(`Approved → "${slug}".`);
+      await Promise.all([loadBilling(), loadAudit(), loadActivity()]);
+    } catch (err) {
+      console.error(err);
+      if (setAuthErrorFrom(err)) return;
+
+      const code = err.payload?.error;
+      if (err.status === 409 && (code === 'space_exists' || code === 'dir_exists')) {
+        setSlugErrors((prev) => ({ ...prev, [reqId]: err.payload?.message || 'Slug already in use.' }));
+      } else {
+        setErrorMsg(err.payload?.message || err.payload?.error || 'Failed to approve request.');
+      }
+    }
+  };
+
+  const handleReject = async (reqId) => {
+    const reason = window.prompt('Optional reason for rejection:', '') || '';
+    try {
+      setErrorMsg('');
+      setStatusMsg('Rejecting…');
+      await adminRejectSpaceRequest(reqId, reason || null);
+      setRequests((prev) => prev.filter((r) => r.id !== reqId));
+      setStatusMsg('Rejected.');
+      await Promise.all([loadBilling(), loadAudit(), loadActivity()]);
+    } catch (err) {
+      console.error(err);
+      if (setAuthErrorFrom(err)) return;
+      setErrorMsg(err.payload?.message || err.payload?.error || 'Failed to reject request.');
+    }
+  };
+
+  // ───────────────── Render ─────────────────
   if (booting) {
     return (
       <div className="login-shell">
@@ -3840,16 +4609,9 @@ function AdminDashboard() {
     );
   }
 
+
   return (
-    <div
-      style={{
-        minHeight: '100vh',
-        width: '100%',
-        padding: 18,
-        background: 'var(--bg-elevated)',
-        boxSizing: 'border-box',
-      }}
-    >
+    <div style={{ minHeight: '100vh', width: '100%', padding: 18, background: 'var(--bg-elevated)', boxSizing: 'border-box' }}>
       <div
         className="login-card"
         style={{
@@ -3862,122 +4624,136 @@ function AdminDashboard() {
           gap: 12,
         }}
       >
-        <div>
-          <h1 style={{ marginBottom: 6 }}>Admin · Workspace Requests</h1>
-          <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-            Admin access is granted by Discord ID (server env: <code>ADMIN_DISCORD_IDS</code>).
-          </p>
+        {/* Header + tabs */}
+        <div style={{ display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' }}>
+          <div>
+            <h1 style={{ marginBottom: 6 }}>Admin</h1>
+            <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+              User drawer opens from Activity/Audit/Billing. Sessions can be revoked from anywhere.
+            </p>
+          </div>
+
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button type="button" className={`button small ${tab === 'activity' ? 'primary' : ''}`} onClick={() => setTab('activity')}>Activity</button>
+            <button type="button" className={`button small ${tab === 'requests' ? 'primary' : ''}`} onClick={() => setTab('requests')}>Requests</button>
+            <button type="button" className={`button small ${tab === 'billing' ? 'primary' : ''}`} onClick={() => setTab('billing')}>Billing</button>
+            <button type="button" className={`button small ${tab === 'create' ? 'primary' : ''}`} onClick={() => setTab('create')}>Create Space</button>
+            <button type="button" className={`button small ${tab === 'email' ? 'primary' : ''}`} onClick={() => setTab('email')}>Send Email</button>
+            <button type="button" className={`button small ${tab === 'templates' ? 'primary' : ''}`} onClick={() => setTab('templates')}>Templates</button>
+            <button type="button" className={`button small ${tab === 'audit' ? 'primary' : ''}`} onClick={() => setTab('audit')}>Audit</button>
+            <button type="button" className={`button small ${tab === 'doctor' ? 'primary' : ''}`} onClick={() => setTab('doctor')}>Doctor</button>
+            <button type="button" className="button small" onClick={() => navigate('/')}>Back</button>
+          </div>
         </div>
 
         {(statusMsg || errorMsg) && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {statusMsg && (
-              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{statusMsg}</div>
-            )}
-            {errorMsg && (
-              <div style={{ fontSize: 12, color: 'var(--danger)' }}>{errorMsg}</div>
-            )}
+            {statusMsg && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{statusMsg}</div>}
+            {errorMsg && <div style={{ fontSize: 12, color: 'var(--danger)' }}>{errorMsg}</div>}
           </div>
         )}
 
-        {/* Top controls: filter + refresh */}
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-          <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-            Requests
-            <select
-              className="theme-select"
-              value={reqStatusFilter}
-              onChange={(e) => setReqStatusFilter(e.target.value)}
-              style={{ marginLeft: 8 }}
-            >
-              <option value="pending">pending</option>
-              <option value="approved">approved</option>
-              <option value="rejected">rejected</option>
-              <option value="all">all</option>
-            </select>
-          </label>
+        {/* ───────── Activity tab ───────── */}
+        {tab === 'activity' && (
+          <div style={{ border: '1px solid var(--panel-border)', borderRadius: 12, padding: 12, background: 'var(--bg-main)' }}>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+              <h2 style={{ fontSize: 14, margin: 0, color: 'var(--text-main)' }}>Activity feed</h2>
 
-          <button
-            type="button"
-            className="button small"
-            onClick={loadRequests}
-            disabled={requestsLoading}
-          >
-            {requestsLoading ? 'Loading…' : 'Refresh'}
-          </button>
+              <button type="button" className="button small" onClick={loadActivity} disabled={activityLoading}>
+                {activityLoading ? 'Loading…' : 'Refresh'}
+              </button>
 
-          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <input
-              type="text"
-              value={userQuery}
-              onChange={(e) => setUserQuery(e.target.value)}
-              placeholder="Search users (@handle, global name, email, u_…, discordId)…"
-              style={{
-                width: 'min(520px, 92vw)',
-                borderRadius: 999,
-                border: '1px solid var(--panel-border)',
-                background: 'var(--bg-main)',
-                color: 'var(--text-main)',
-                padding: '8px 12px',
-                fontSize: 13,
-                outline: 'none',
-              }}
-            />
-          </div>
-        </div>
+              <input
+                type="number"
+                value={activityLimit}
+                onChange={(e) => setActivityLimit(Number(e.target.value) || 200)}
+                style={{
+                  width: 120,
+                  borderRadius: 999,
+                  border: '1px solid var(--panel-border)',
+                  background: 'var(--bg-main)',
+                  color: 'var(--text-main)',
+                  padding: '8px 12px',
+                  fontSize: 13,
+                  outline: 'none',
+                }}
+                min={1}
+                max={2000}
+              />
 
-        {/* User search results (shared picker) */}
-        {userQuery.trim() && (
-          <div
-            style={{
-              border: '1px solid var(--panel-border)',
-              borderRadius: 12,
-              padding: 10,
-              background: 'var(--bg-main)',
-              maxHeight: 220,
-              overflowY: 'auto',
-            }}
-          >
-            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
-              {userSearching ? 'Searching…' : `Results (${userResults.length})`}
-              <span style={{ marginLeft: 10, opacity: 0.75 }}>
-                Click a user to set as “Create space owner”. Shift+Click sets as “Email recipient”.
-              </span>
+              <input
+                type="text"
+                value={activityQ}
+                onChange={(e) => setActivityQ(e.target.value)}
+                placeholder="filter… (slug, email, action, discordId)"
+                style={{
+                  flex: '1 1 260px',
+                  borderRadius: 999,
+                  border: '1px solid var(--panel-border)',
+                  background: 'var(--bg-main)',
+                  color: 'var(--text-main)',
+                  padding: '8px 12px',
+                  fontSize: 13,
+                  outline: 'none',
+                  marginLeft: 'auto',
+                }}
+              />
             </div>
 
-            {userResults.length === 0 && !userSearching ? (
-              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No matches.</div>
+            {filteredActivity.length === 0 ? (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No items.</div>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {userResults.map((u) => {
-                  const label = bestHandle(u);
-                  const sub = [
-                    u.id ? `id: ${u.id}` : '',
-                    u.discordId ? `discordId: ${u.discordId}` : '',
-                    u.email ? `email: ${u.email}` : (u.pendingEmail ? `pending: ${u.pendingEmail}` : ''),
-                    u.emailVerifiedAt ? 'verified' : 'unverified',
-                  ].filter(Boolean).join(' · ');
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {filteredActivity.map((it, idx) => {
+                  const actor = it.actor || {};
+                  const target = it.target || {};
+                  const actorLabel =
+                    actor.discordUsername ? `@${actor.discordUsername}` :
+                    actor.discordId ? actor.discordId :
+                    actor.userId ? actor.userId : '';
+
+                  const tgtLabel =
+                    target.slug ? `space:${target.slug}` :
+                    target.id ? `${target.type || 'target'}:${target.id}` :
+                    target.email ? `email:${target.email}` :
+                    target.userId ? `user:${target.userId}` :
+                    target.type || 'target';
+
+                  const uid = extractUserId(it);
 
                   return (
-                    <button
-                      key={u.id}
-                      type="button"
-                      className="button small"
-                      style={{
-                        textAlign: 'left',
-                        justifyContent: 'flex-start',
-                        borderRadius: 12,
-                      }}
-                      onClick={(e) => {
-                        if (e.shiftKey) handlePickEmailUser(u);
-                        else handlePickOwnerForCreate(u);
-                      }}
-                    >
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                        <div style={{ fontSize: 12, color: 'var(--text-main)' }}>{label}</div>
-                        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{sub}</div>
+                    <div key={`${it.kind}-${it.id || idx}`} style={{ border: '1px solid var(--panel-border)', borderRadius: 12, padding: 10 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+                        <div style={{ fontSize: 12, color: 'var(--text-main)' }}>
+                          <strong>{it.action}</strong>{' '}
+                          <span style={{ color: 'var(--text-muted)' }}>· {fmtWhen(it.at)}</span>
+                          <span className="pill pill--tiny" style={{ marginLeft: 8 }}>{it.kind}</span>
+                        </div>
+
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                            {actorLabel ? <>{actorLabel} → </> : null}<code>{tgtLabel}</code>
+                          </div>
+
+                          {uid && (
+                            <>
+                              <button type="button" className="button small" onClick={() => openUserDrawer(uid)}>
+                                Open user
+                              </button>
+                              <button type="button" className="button small" onClick={() => openSessionsModal(uid)}>
+                                Sessions
+                              </button>
+                            </>
+                          )}
+                        </div>
                       </div>
-                    </button>
+
+                      {it.detail ? (
+                        <pre style={{ marginTop: 8, fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'pre-wrap' }}>
+                          {JSON.stringify(it.detail, null, 2)}
+                        </pre>
+                      ) : null}
+                    </div>
                   );
                 })}
               </div>
@@ -3985,31 +4761,303 @@ function AdminDashboard() {
           </div>
         )}
 
-        {/* Panels */}
-        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-start' }}>
-          {/* Create space */}
-          <div
-            style={{
-              flex: '1 1 420px',
-              border: '1px solid var(--panel-border)',
-              borderRadius: 12,
-              padding: 12,
-              background: 'var(--bg-main)',
-              minHeight: 220,
-            }}
-          >
-            <h2 style={{ fontSize: 14, margin: '0 0 10px', color: 'var(--text-main)' }}>
-              Create space
-            </h2>
+        {/* ───────── Requests tab ───────── */}
+        {tab === 'requests' && (
+          <div style={{ border: '1px solid var(--panel-border)', borderRadius: 12, padding: 12, background: 'var(--bg-main)' }}>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+              <h2 style={{ fontSize: 14, margin: 0, color: 'var(--text-main)' }}>Workspace requests</h2>
 
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+              <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                Status
+                <select className="theme-select" value={reqStatusFilter} onChange={(e) => setReqStatusFilter(e.target.value)} style={{ marginLeft: 8 }}>
+                  <option value="pending">pending</option>
+                  <option value="approved">approved</option>
+                  <option value="rejected">rejected</option>
+                  <option value="all">all</option>
+                </select>
+              </label>
+
+              <button type="button" className="button small" onClick={loadRequests} disabled={requestsLoading}>
+                {requestsLoading ? 'Loading…' : 'Refresh'}
+              </button>
+            </div>
+
+            {requestsLoading ? (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Loading…</div>
+            ) : requests.length === 0 ? (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No requests.</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {requests.map((r) => {
+                  const slugValue = getSlugForRequest(r);
+                  const slugError = slugErrors[r.id] || null;
+                  const slugIsValid = slugValue && isValidSlug(slugValue);
+
+                  const who =
+                    (r.discordUsername ? `@${r.discordUsername}` : '') ||
+                    (r.discordGlobalName ? String(r.discordGlobalName) : '') ||
+                    (r.email ? String(r.email) : '') ||
+                    (r.userId ? String(r.userId) : r.id);
+
+                  return (
+                    <div key={r.id} style={{ border: '1px solid var(--panel-border)', borderRadius: 12, padding: 10 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+                        <div style={{ fontSize: 13, color: 'var(--text-main)' }}>
+                          <strong>{who}</strong>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                            requestId: {r.id} · userId: {r.userId || '—'} · {r.createdAt || ''}
+                          </div>
+                        </div>
+
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                          {r.userId && (
+                            <button type="button" className="button small" onClick={() => openUserDrawer(r.userId)}>
+                              Open user
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      <div style={{ marginTop: 10, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+                        <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                          Space slug
+                          <input
+                            type="text"
+                            value={slugValue}
+                            onChange={(e) => handleSlugChange(r.id, e.target.value)}
+                            placeholder="e.g. southphilly-hud"
+                            style={{
+                              marginTop: 6,
+                              width: 260,
+                              borderRadius: 999,
+                              border: '1px solid var(--panel-border)',
+                              background: 'var(--bg-main)',
+                              color: 'var(--text-main)',
+                              padding: '8px 12px',
+                              fontSize: 13,
+                              outline: 'none',
+                            }}
+                          />
+                        </label>
+
+                        {slugError && <div style={{ fontSize: 12, color: 'var(--danger)' }}>{slugError}</div>}
+
+                        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                          <button type="button" className="button small" onClick={() => handleApprove(r.id, 100)} disabled={!slugIsValid}>
+                            Approve
+                          </button>
+                          <button
+                            type="button"
+                            className="button small"
+                            onClick={() => {
+                              const q = window.prompt('Quota in MB:', '100');
+                              const n = q ? Number(q) : 100;
+                              handleApprove(r.id, n);
+                            }}
+                            disabled={!slugIsValid}
+                          >
+                            Approve (custom quota)
+                          </button>
+                          <button type="button" className="button small" onClick={() => handleReject(r.id)}>
+                            Reject
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ───────── Billing tab ───────── */}
+        {tab === 'billing' && (
+          <div style={{ border: '1px solid var(--panel-border)', borderRadius: 12, padding: 12, background: 'var(--bg-main)' }}>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+              <h2 style={{ fontSize: 14, margin: 0, color: 'var(--text-main)' }}>Billing & entitlement</h2>
+
+              <button type="button" className="button small" onClick={loadBilling} disabled={billingLoading}>
+                {billingLoading ? 'Loading…' : 'Refresh'}
+              </button>
+
+              <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {['all','comped','paid','unpaid','expiringSoon','inactive'].map((k) => (
+                  <button key={k} type="button" className={`button small ${billingFilter === k ? 'primary' : ''}`} onClick={() => setBillingFilter(k)}>
+                    {k}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {billingCounts && (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>
+                Total {billingCounts.total} · comped {billingCounts.comped} · paid {billingCounts.paid} · unpaid {billingCounts.unpaid} · expiring soon {billingCounts.expiringSoon} · inactive {billingCounts.inactive}
+              </div>
+            )}
+
+            {filteredBillingUsers.length === 0 ? (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No users in this view.</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {filteredBillingUsers.slice(0, 160).map((u) => {
+                  const ent = u.entitlement || {};
+                  const edit = billingEdits[u.id] || {};
+                  const busy = !!billingSaving[u.id];
+
+                  const pill =
+                    !ent.isActive ? { text: 'inactive', cls: 'pill--warn' } :
+                    ent.isComped ? { text: 'comped', cls: 'pill--ok' } :
+                    ent.isPaid ? { text: `paid (${ent.daysLeft ?? '—'}d)`, cls: ent.expiringSoon ? 'pill--warn' : 'pill--ok' } :
+                    { text: 'unpaid', cls: 'pill--warn' };
+
+                  return (
+                    <div key={u.id} style={{ border: '1px solid var(--panel-border)', borderRadius: 12, padding: 10 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+                        <div style={{ minWidth: 260 }}>
+                          <div style={{ fontSize: 13, color: 'var(--text-main)' }}>
+                            <strong>{bestHandle(u)}</strong>{' '}
+                            <span className={`pill pill--tiny ${pill.cls}`} style={{ marginLeft: 8 }}>{pill.text}</span>
+                          </div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                            userId: {u.id} · lastLogin: {fmtWhen(u.lastLoginAt)}
+                          </div>
+                        </div>
+
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                          <button type="button" className="button small" onClick={() => openUserDrawer(u.id)} disabled={busy}>
+                            Open user
+                          </button>
+                          <button type="button" className="button small" onClick={() => openSessionsModal(u)} disabled={busy}>
+                            Sessions
+                          </button>
+                          <button type="button" className="button small" onClick={() => quickCompIndefinitely(u)} disabled={busy}>
+                            Comp indefinitely
+                          </button>
+                          <button type="button" className="button small" onClick={() => quickExtend30(u)} disabled={busy || !!edit.comped}>
+                            Extend 30 days
+                          </button>
+                        </div>
+                      </div>
+
+                      <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: 'repeat(12, 1fr)', gap: 8 }}>
+                        <label style={{ gridColumn: 'span 2', fontSize: 12, color: 'var(--text-muted)' }}>
+                          Comped
+                          <div style={{ marginTop: 6 }}>
+                            <input
+                              type="checkbox"
+                              checked={!!edit.comped}
+                              onChange={(e) => setBillingField(u.id, 'comped', e.target.checked)}
+                              disabled={busy}
+                            />
+                          </div>
+                        </label>
+
+                        <label style={{ gridColumn: 'span 3', fontSize: 12, color: 'var(--text-muted)' }}>
+                          Paid until
+                          <input
+                            type="date"
+                            value={fmtDateInput(edit.paidUntil)}
+                            onChange={(e) => setBillingField(u.id, 'paidUntil', dateInputToIsoOrNull(e.target.value))}
+                            disabled={busy || !!edit.comped}
+                            style={{
+                              marginTop: 6,
+                              width: '100%',
+                              borderRadius: 999,
+                              border: '1px solid var(--panel-border)',
+                              background: 'var(--bg-main)',
+                              color: 'var(--text-main)',
+                              padding: '8px 12px',
+                              fontSize: 13,
+                              outline: 'none',
+                            }}
+                          />
+                        </label>
+
+                        <label style={{ gridColumn: 'span 2', fontSize: 12, color: 'var(--text-muted)' }}>
+                          Tier
+                          <input
+                            type="text"
+                            value={String(edit.tier || '')}
+                            onChange={(e) => setBillingField(u.id, 'tier', e.target.value)}
+                            disabled={busy}
+                            placeholder="e.g. pro"
+                            style={{
+                              marginTop: 6,
+                              width: '100%',
+                              borderRadius: 999,
+                              border: '1px solid var(--panel-border)',
+                              background: 'var(--bg-main)',
+                              color: 'var(--text-main)',
+                              padding: '8px 12px',
+                              fontSize: 13,
+                              outline: 'none',
+                            }}
+                          />
+                        </label>
+
+                        <label style={{ gridColumn: 'span 3', fontSize: 12, color: 'var(--text-muted)' }}>
+                          Status
+                          <select
+                            className="theme-select"
+                            value={String(edit.status || u.status || 'active')}
+                            onChange={(e) => setBillingField(u.id, 'status', e.target.value)}
+                            disabled={busy}
+                            style={{ marginTop: 6, width: '100%' }}
+                          >
+                            <option value="active">active</option>
+                            <option value="inactive">inactive</option>
+                          </select>
+                        </label>
+
+                        <div style={{ gridColumn: 'span 2', display: 'flex', alignItems: 'end', justifyContent: 'flex-end' }}>
+                          <button type="button" className="button small primary" onClick={() => saveBillingRow(u)} disabled={busy}>
+                            {busy ? 'Saving…' : 'Save'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  Showing first 160 users in this view (expand later with paging/search).
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ───────── Create Space tab ───────── */}
+        {tab === 'create' && (
+          <div style={{ border: '1px solid var(--panel-border)', borderRadius: 12, padding: 12, background: 'var(--bg-main)' }}>
+            <h2 style={{ fontSize: 14, margin: '0 0 10px', color: 'var(--text-main)' }}>Create space</h2>
+
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>
+              Pick an owner via the user search UI in your existing build (or wire it back in if you removed it).
+            </div>
+
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
+              Owner:
+              <div style={{ marginTop: 4, color: 'var(--text-main)' }}>
+                {createOwnerUser ? (
+                  <>
+                    <strong>{bestHandle(createOwnerUser)}</strong> <span style={{ opacity: 0.7 }}>({createOwnerUser.id})</span>
+                  </>
+                ) : (
+                  <span style={{ opacity: 0.8 }}>none</span>
+                )}
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
               <input
                 type="text"
                 value={createSlug}
                 onChange={(e) => setCreateSlug(e.target.value)}
                 placeholder="slug (e.g. demo-hud)"
                 style={{
-                  flex: '1 1 180px',
+                  flex: '1 1 220px',
                   borderRadius: 999,
                   border: '1px solid var(--panel-border)',
                   background: 'var(--bg-main)',
@@ -4025,7 +5073,7 @@ function AdminDashboard() {
                 onChange={(e) => setCreateQuotaMb(e.target.value)}
                 placeholder="quota MB"
                 style={{
-                  width: 120,
+                  width: 160,
                   borderRadius: 999,
                   border: '1px solid var(--panel-border)',
                   background: 'var(--bg-main)',
@@ -4035,61 +5083,24 @@ function AdminDashboard() {
                   outline: 'none',
                 }}
               />
-            </div>
-
-            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
-              Owner (pick via search above):
-              <div style={{ marginTop: 4, color: 'var(--text-main)' }}>
-                {createOwnerUser ? (
-                  <>
-                    <strong>{bestHandle(createOwnerUser)}</strong> <span style={{ opacity: 0.7 }}>({createOwnerUser.id})</span>
-                  </>
-                ) : (
-                  <span style={{ opacity: 0.8 }}>none</span>
-                )}
-              </div>
-            </div>
-
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <button
-                type="button"
-                className="button small primary"
-                onClick={handleCreateSpace}
-                disabled={creatingSpace}
-              >
+              <button type="button" className="button small primary" onClick={handleCreateSpace} disabled={creatingSpace}>
                 {creatingSpace ? 'Creating…' : 'Create'}
               </button>
-
-              {createOwnerUser && (
-                <button
-                  type="button"
-                  className="button small"
-                  onClick={() => setCreateOwnerUser(null)}
-                  disabled={creatingSpace}
-                >
-                  Clear owner
-                </button>
-              )}
             </div>
           </div>
+        )}
 
-          {/* Send email */}
-          <div
-            style={{
-              flex: '1 1 420px',
-              border: '1px solid var(--panel-border)',
-              borderRadius: 12,
-              padding: 12,
-              background: 'var(--bg-main)',
-              minHeight: 220,
-            }}
-          >
-            <h2 style={{ fontSize: 14, margin: '0 0 10px', color: 'var(--text-main)' }}>
-              Send email
-            </h2>
+        {/* ───────── Send Email tab ───────── */}
+        {tab === 'email' && (
+          <div style={{ border: '1px solid var(--panel-border)', borderRadius: 12, padding: 12, background: 'var(--bg-main)' }}>
+            <h2 style={{ fontSize: 14, margin: '0 0 10px', color: 'var(--text-main)' }}>Send email</h2>
+
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>
+              Pick a recipient via user drawer (Open user → copy id) or your search UI.
+            </div>
 
             <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
-              Recipient (Shift+Click a user in search results):
+              Recipient:
               <div style={{ marginTop: 4, color: 'var(--text-main)' }}>
                 {emailUser ? (
                   <>
@@ -4122,10 +5133,10 @@ function AdminDashboard() {
             <textarea
               value={emailBody}
               onChange={(e) => setEmailBody(e.target.value)}
-              placeholder="Text body…"
+              placeholder="Body…"
               style={{
                 width: '100%',
-                minHeight: 110,
+                minHeight: 160,
                 borderRadius: 12,
                 border: '1px solid var(--panel-border)',
                 background: 'var(--bg-main)',
@@ -4140,11 +5151,7 @@ function AdminDashboard() {
 
             <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
               <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'inline-flex', gap: 8, alignItems: 'center' }}>
-                <input
-                  type="checkbox"
-                  checked={emailAsHtml}
-                  onChange={(e) => setEmailAsHtml(e.target.checked)}
-                />
+                <input type="checkbox" checked={emailAsHtml} onChange={(e) => setEmailAsHtml(e.target.checked)} />
                 Send as HTML
               </label>
 
@@ -4165,155 +5172,831 @@ function AdminDashboard() {
                 }}
               />
 
-              <button
-                type="button"
-                className="button small primary"
-                onClick={handleSendEmail}
-                disabled={sendingEmail}
-              >
+              <button type="button" className="button small primary" onClick={handleSendEmail} disabled={sendingEmail}>
                 {sendingEmail ? 'Sending…' : 'Send'}
               </button>
-
-              {emailUser && (
-                <button
-                  type="button"
-                  className="button small"
-                  onClick={() => setEmailUser(null)}
-                  disabled={sendingEmail}
-                >
-                  Clear user
-                </button>
-              )}
             </div>
           </div>
-        </div>
+        )}
 
-        {/* Requests list */}
+{tab === 'templates' && (
+  <div
+    style={{
+      border: '1px solid var(--panel-border)',
+      borderRadius: 12,
+      padding: 12,
+      background: 'var(--bg-main)',
+    }}
+  >
+    <div
+      style={{
+        display: 'flex',
+        gap: 10,
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        marginBottom: 10,
+      }}
+    >
+      <h2 style={{ fontSize: 14, margin: 0, color: 'var(--text-main)' }}>
+        Email templates
+      </h2>
+
+      <button
+        type="button"
+        className="button small"
+        onClick={loadTemplates}
+        disabled={tplLoading}
+      >
+        {tplLoading ? 'Loading…' : 'Refresh'}
+      </button>
+
+      <button
+        type="button"
+        className="button small"
+        onClick={newTemplate}
+        disabled={tplSaving || tplDeleting}
+      >
+        New
+      </button>
+
+      <div style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--text-muted)' }}>
+        Variables:{' '}
+        <code>
+          {'{{handle}} {{email}} {{slug}} {{iframeUrl}} {{appUrl}} {{nowIso}}'}
+        </code>
+      </div>
+    </div>
+
+    {tplError && (
+      <div style={{ fontSize: 12, color: 'var(--danger)', marginBottom: 10 }}>
+        {tplError}
+      </div>
+    )}
+
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, 1fr)', gap: 10 }}>
+      {/* Left: template list */}
+      <div
+        style={{
+          gridColumn: 'span 4',
+          border: '1px solid var(--panel-border)',
+          borderRadius: 12,
+          padding: 10,
+          maxHeight: 560,
+          overflowY: 'auto',
+        }}
+      >
+        <input
+          type="text"
+          value={tplQuery}
+          onChange={(e) => setTplQuery(e.target.value)}
+          placeholder="Filter templates…"
+          style={{
+            width: '100%',
+            borderRadius: 999,
+            border: '1px solid var(--panel-border)',
+            background: 'var(--bg-main)',
+            color: 'var(--text-main)',
+            padding: '8px 12px',
+            fontSize: 13,
+            outline: 'none',
+            marginBottom: 10,
+          }}
+        />
+
+        {(templates || [])
+          .filter((t) => {
+            const q = String(tplQuery || '').trim().toLowerCase();
+            if (!q) return true;
+            const hay = [t?.name, t?.subject, t?.mode, t?.id]
+              .filter(Boolean)
+              .join(' ')
+              .toLowerCase();
+            return hay.includes(q);
+          })
+          .map((t) => {
+            const active = t.id === activeTplId;
+            return (
+              <button
+                key={t.id}
+                type="button"
+                className={`button small ${active ? 'primary' : ''}`}
+                style={{
+                  width: '100%',
+                  justifyContent: 'flex-start',
+                  borderRadius: 12,
+                  marginBottom: 6,
+                  textAlign: 'left',
+                }}
+                onClick={() => selectTemplate(t)}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 2,
+                    width: '100%',
+                  }}
+                >
+                  <div style={{ fontSize: 12, color: 'var(--text-main)' }}>
+                    <strong>{t.name}</strong>{' '}
+                    <span className="pill pill--tiny" style={{ marginLeft: 6 }}>
+                      {t.mode}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                    {t.subject}
+                  </div>
+                  <div style={{ fontSize: 10, color: 'var(--text-muted)', opacity: 0.8 }}>
+                    {t.id}
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+      </div>
+
+      {/* Right: editor + send */}
+      <div
+        style={{
+          gridColumn: 'span 8',
+          border: '1px solid var(--panel-border)',
+          borderRadius: 12,
+          padding: 10,
+        }}
+      >
         <div
           style={{
-            flex: '1 1 auto',
-            border: '1px solid var(--panel-border)',
-            borderRadius: 12,
-            padding: 12,
-            background: 'var(--bg-main)',
-            minHeight: 240,
+            display: 'flex',
+            gap: 8,
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            marginBottom: 10,
           }}
         >
-          <h2 style={{ fontSize: 14, margin: '0 0 10px', color: 'var(--text-main)' }}>
-            Workspace requests
-          </h2>
+          <button
+            type="button"
+            className="button small primary"
+            onClick={saveTemplate}
+            disabled={tplSaving || tplDeleting}
+          >
+            {tplSaving ? 'Saving…' : tplDraft.id ? (tplDirty ? 'Save' : 'Saved') : 'Create'}
+          </button>
 
-          {requestsLoading ? (
-            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Loading…</div>
-          ) : requests.length === 0 ? (
-            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No requests.</div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {requests.map((r) => {
-                const slugValue = getSlugForRequest(r);
-                const slugError = slugErrors[r.id] || null;
-                const slugIsValid = slugValue && isValidSlug(slugValue);
+          <button
+            type="button"
+            className="button small"
+            onClick={deleteTemplate}
+            disabled={!tplDraft.id || tplSaving || tplDeleting}
+          >
+            {tplDeleting ? 'Deleting…' : 'Delete'}
+          </button>
 
-                const who =
-                  (r.discordUsername ? `@${r.discordUsername}` : '') ||
-                  (r.discordGlobalName ? String(r.discordGlobalName) : '') ||
-                  (r.email ? String(r.email) : '') ||
-                  (r.userId ? String(r.userId) : r.id);
+          {tplSendStatus && (
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{tplSendStatus}</div>
+          )}
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, 1fr)', gap: 8 }}>
+          <label style={{ gridColumn: 'span 5', fontSize: 12, color: 'var(--text-muted)' }}>
+            Name
+            <input
+              type="text"
+              value={tplDraft.name}
+              onChange={(e) => setDraftField('name', e.target.value)}
+              style={{
+                marginTop: 6,
+                width: '100%',
+                borderRadius: 999,
+                border: '1px solid var(--panel-border)',
+                background: 'var(--bg-main)',
+                color: 'var(--text-main)',
+                padding: '8px 12px',
+                fontSize: 13,
+                outline: 'none',
+              }}
+            />
+          </label>
+
+          <label style={{ gridColumn: 'span 7', fontSize: 12, color: 'var(--text-muted)' }}>
+            Subject
+            <input
+              type="text"
+              value={tplDraft.subject}
+              onChange={(e) => setDraftField('subject', e.target.value)}
+              style={{
+                marginTop: 6,
+                width: '100%',
+                borderRadius: 999,
+                border: '1px solid var(--panel-border)',
+                background: 'var(--bg-main)',
+                color: 'var(--text-main)',
+                padding: '8px 12px',
+                fontSize: 13,
+                outline: 'none',
+              }}
+            />
+          </label>
+
+          <label style={{ gridColumn: 'span 4', fontSize: 12, color: 'var(--text-muted)' }}>
+            Mode
+            <select
+              className="theme-select"
+              value={tplDraft.mode}
+              onChange={(e) => setDraftField('mode', e.target.value)}
+              style={{ marginTop: 6, width: '100%' }}
+            >
+              <option value="text">text</option>
+              <option value="html">html</option>
+              <option value="both">both</option>
+            </select>
+          </label>
+
+          <label style={{ gridColumn: 'span 8', fontSize: 12, color: 'var(--text-muted)' }}>
+            Optional space slug for template variables (when sending)
+            <input
+              type="text"
+              value={tplSendSpaceSlug}
+              onChange={(e) => setTplSendSpaceSlug(e.target.value)}
+              placeholder="e.g. scott-hud"
+              style={{
+                marginTop: 6,
+                width: '100%',
+                borderRadius: 999,
+                border: '1px solid var(--panel-border)',
+                background: 'var(--bg-main)',
+                color: 'var(--text-main)',
+                padding: '8px 12px',
+                fontSize: 13,
+                outline: 'none',
+              }}
+            />
+          </label>
+
+          <label style={{ gridColumn: 'span 12', fontSize: 12, color: 'var(--text-muted)' }}>
+            Text body
+            <textarea
+              value={tplDraft.text}
+              onChange={(e) => setDraftField('text', e.target.value)}
+              placeholder="Plain text email…"
+              style={{
+                marginTop: 6,
+                width: '100%',
+                minHeight: 120,
+                borderRadius: 12,
+                border: '1px solid var(--panel-border)',
+                background: 'var(--bg-main)',
+                color: 'var(--text-main)',
+                padding: '10px 12px',
+                fontSize: 13,
+                outline: 'none',
+                resize: 'vertical',
+              }}
+            />
+          </label>
+
+          <label style={{ gridColumn: 'span 12', fontSize: 12, color: 'var(--text-muted)' }}>
+            HTML body
+            <textarea
+              value={tplDraft.html}
+              onChange={(e) => setDraftField('html', e.target.value)}
+              placeholder="<div>HTML email…</div>"
+              style={{
+                marginTop: 6,
+                width: '100%',
+                minHeight: 120,
+                borderRadius: 12,
+                border: '1px solid var(--panel-border)',
+                background: 'var(--bg-main)',
+                color: 'var(--text-main)',
+                padding: '10px 12px',
+                fontSize: 13,
+                outline: 'none',
+                resize: 'vertical',
+              }}
+            />
+          </label>
+        </div>
+
+        {/* Send panel */}
+        <div style={{ marginTop: 12, borderTop: '1px solid var(--panel-border)', paddingTop: 12 }}>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-main)' }}>
+              Send using template
+            </div>
+
+            <button
+              type="button"
+              className="button small primary"
+              onClick={sendTemplate}
+              disabled={tplSending || !tplSendUser || !tplDraft.id}
+            >
+              {tplSending ? 'Sending…' : 'Send'}
+            </button>
+
+            <div style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--text-muted)' }}>
+              Recipient:{' '}
+              <code>
+                {tplSendUser ? (tplSendUser.email || tplSendUser.pendingEmail || tplSendUser.id) : 'none'}
+              </code>
+            </div>
+          </div>
+
+          <input
+            type="text"
+            value={tplSendQuery}
+            onChange={(e) => setTplSendQuery(e.target.value)}
+            placeholder="Search recipient user… (@handle, email, u_…)"
+            style={{
+              width: '100%',
+              borderRadius: 999,
+              border: '1px solid var(--panel-border)',
+              background: 'var(--bg-main)',
+              color: 'var(--text-main)',
+              padding: '8px 12px',
+              fontSize: 13,
+              outline: 'none',
+              marginBottom: 10,
+            }}
+          />
+
+          {tplSendQuery.trim() && (
+            <div
+              style={{
+                maxHeight: 180,
+                overflowY: 'auto',
+                border: '1px solid var(--panel-border)',
+                borderRadius: 12,
+                padding: 8,
+              }}
+            >
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
+                {tplSendSearching ? 'Searching…' : `Results (${tplSendResults.length})`}
+              </div>
+
+              {tplSendResults.map((u) => {
+                const label =
+                  (u.discordUsername ? `@${u.discordUsername}` : '') ||
+                  (u.discordGlobalName ? String(u.discordGlobalName) : '') ||
+                  (u.email ? String(u.email) : '') ||
+                  u.id;
 
                 return (
-                  <div
-                    key={r.id}
+                  <button
+                    key={u.id}
+                    type="button"
+                    className="button small"
                     style={{
-                      border: '1px solid var(--panel-border)',
+                      width: '100%',
+                      justifyContent: 'flex-start',
                       borderRadius: 12,
-                      padding: 10,
-                      background: 'var(--bg-main)',
+                      marginBottom: 6,
+                      textAlign: 'left',
+                    }}
+                    onClick={() => {
+                      setTplSendUser(u);
+                      setTplSendStatus('');
                     }}
                   >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
-                      <div style={{ fontSize: 13, color: 'var(--text-main)' }}>
-                        <strong>{who}</strong>
-                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
-                          requestId: {r.id} · userId: {r.userId || '—'} · {r.createdAt || ''}
-                        </div>
-                      </div>
-
-                      <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                        status: <strong>{r.status}</strong>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <div style={{ fontSize: 12, color: 'var(--text-main)' }}>{label}</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                        {u.id} · {u.emailVerifiedAt ? 'verified' : 'unverified'}
                       </div>
                     </div>
-
-                    {r.note ? (
-                      <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-main)' }}>
-                        Note: <span style={{ color: 'var(--accent-secondary)' }}>{r.note}</span>
-                      </div>
-                    ) : null}
-
-                    <div style={{ marginTop: 10, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-                      <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                        Space slug
-                        <input
-                          type="text"
-                          value={slugValue}
-                          onChange={(e) => handleSlugChange(r.id, e.target.value)}
-                          placeholder="e.g. southphilly-hud"
-                          style={{
-                            marginTop: 6,
-                            width: 260,
-                            borderRadius: 999,
-                            border: '1px solid var(--panel-border)',
-                            background: 'var(--bg-main)',
-                            color: 'var(--text-main)',
-                            padding: '8px 12px',
-                            fontSize: 13,
-                            outline: 'none',
-                          }}
-                        />
-                      </label>
-
-                      {slugError && (
-                        <div style={{ fontSize: 12, color: 'var(--danger)' }}>
-                          {slugError}
-                        </div>
-                      )}
-
-                      <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                        <button
-                          type="button"
-                          className="button small"
-                          onClick={() => handleApprove(r.id, 100)}
-                          disabled={!slugIsValid}
-                        >
-                          Approve
-                        </button>
-                        <button
-                          type="button"
-                          className="button small"
-                          onClick={() => {
-                            const q = window.prompt('Quota in MB:', '100');
-                            const n = q ? Number(q) : 100;
-                            handleApprove(r.id, n);
-                          }}
-                          disabled={!slugIsValid}
-                        >
-                          Approve (custom quota)
-                        </button>
-                        <button
-                          type="button"
-                          className="button small"
-                          onClick={() => handleReject(r.id)}
-                        >
-                          Reject
-                        </button>
-                      </div>
-                    </div>
-                  </div>
+                  </button>
                 );
               })}
             </div>
           )}
         </div>
+      </div>
+    </div>
+  </div>
+)} 
 
+
+        {/* ───────── Audit tab ───────── */}
+        {tab === 'audit' && (
+          <div style={{ border: '1px solid var(--panel-border)', borderRadius: 12, padding: 12, background: 'var(--bg-main)' }}>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+              <h2 style={{ fontSize: 14, margin: 0, color: 'var(--text-main)' }}>Audit log</h2>
+
+              <button type="button" className="button small" onClick={loadAudit} disabled={auditLoading}>
+                {auditLoading ? 'Loading…' : 'Refresh'}
+              </button>
+
+              <input
+                type="number"
+                value={auditLimit}
+                onChange={(e) => setAuditLimit(Number(e.target.value) || 200)}
+                style={{
+                  width: 120,
+                  borderRadius: 999,
+                  border: '1px solid var(--panel-border)',
+                  background: 'var(--bg-main)',
+                  color: 'var(--text-main)',
+                  padding: '8px 12px',
+                  fontSize: 13,
+                  outline: 'none',
+                }}
+                min={1}
+                max={2000}
+              />
+            </div>
+
+            {auditEntries.length === 0 ? (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No audit entries.</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {auditEntries.map((e) => {
+                  const a = e.actor || {};
+                  const t = e.target || {};
+                  const who = a.discordUsername ? `@${a.discordUsername}` : (a.discordId || a.userId || 'admin');
+                  const tgt = t.slug ? `space:${t.slug}` : (t.id ? `${t.type || 'target'}:${t.id}` : (t.email ? `email:${t.email}` : (t.type || 'target')));
+                  const uid = extractUserId(e);
+
+                  return (
+                    <div key={e.id} style={{ border: '1px solid var(--panel-border)', borderRadius: 12, padding: 10 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+                        <div style={{ fontSize: 12, color: 'var(--text-main)' }}>
+                          <strong>{e.action}</strong>{' '}
+                          <span style={{ color: 'var(--text-muted)' }}>· {fmtWhen(e.at)}</span>
+                        </div>
+
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                            {who} → <code>{tgt}</code>
+                          </div>
+
+                          {uid && (
+                            <>
+                              <button type="button" className="button small" onClick={() => openUserDrawer(uid)}>
+                                Open user
+                              </button>
+                              <button type="button" className="button small" onClick={() => openSessionsModal(uid)}>
+                                Sessions
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+
+                      {e.detail ? (
+                        <pre style={{ marginTop: 8, fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'pre-wrap' }}>
+                          {JSON.stringify(e.detail, null, 2)}
+                        </pre>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+{tab === 'doctor' && (
+  <div
+    style={{
+      border: '1px solid var(--panel-border)',
+      borderRadius: 12,
+      padding: 12,
+      background: 'var(--bg-main)',
+    }}
+  >
+    <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+      <h2 style={{ fontSize: 14, margin: 0, color: 'var(--text-main)' }}>System Doctor</h2>
+
+      <button type="button" className="button small" onClick={loadDoctor} disabled={doctorLoading}>
+        {doctorLoading ? 'Loading…' : 'Refresh'}
+      </button>
+
+      <div style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--text-muted)' }}>
+        {doctorData?.at ? <>as of {new Date(doctorData.at).toLocaleString()}</> : null}
+      </div>
+    </div>
+
+    {doctorError && (
+      <div style={{ fontSize: 12, color: 'var(--danger)', marginBottom: 10 }}>
+        {doctorError}
+      </div>
+    )}
+
+    {!doctorData ? (
+      <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No data loaded.</div>
+    ) : (
+      <>
+        {/* Checklist */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
+          {(doctorData.checks || []).map((c) => (
+            <div
+              key={c.key}
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                gap: 10,
+                padding: '8px 10px',
+                border: '1px solid var(--panel-border)',
+                borderRadius: 12,
+              }}
+            >
+              <div style={{ fontSize: 12, color: 'var(--text-main)' }}>{c.label}</div>
+              <span className={`pill pill--tiny ${c.ok ? 'pill--ok' : 'pill--warn'}`}>
+                {c.ok ? 'OK' : 'WARN'}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {/* Services */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, 1fr)', gap: 10 }}>
+          <div style={{ gridColumn: 'span 6', border: '1px solid var(--panel-border)', borderRadius: 12, padding: 10 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-main)', marginBottom: 8 }}>Services</div>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+              <div>SendGrid: <code>{doctorData.services?.sendgrid?.configured ? 'configured' : 'missing'}</code></div>
+              <div>Discord OAuth: <code>{doctorData.services?.discord?.configured ? 'configured' : 'missing'}</code></div>
+              <div>Discord guild check: <code>{doctorData.services?.discord?.guildConfigured ? 'configured' : 'missing'}</code></div>
+              <div>OpenAI: <code>{doctorData.services?.openai?.configured ? 'configured' : 'missing'}</code></div>
+              <div style={{ marginTop: 6 }}>
+                Default model: <code>{doctorData.services?.openai?.defaultModel || '—'}</code>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ gridColumn: 'span 6', border: '1px solid var(--panel-border)', borderRadius: 12, padding: 10 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-main)', marginBottom: 8 }}>Config</div>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+              <div>env: <code>{doctorData.config?.env || '—'}</code></div>
+              <div>app base: <code>{doctorData.config?.appBaseUrl || '—'}</code></div>
+              <div>iframe base: <code>{doctorData.config?.publicIframeBaseUrl || '—'}</code></div>
+              <div>trust proxy: <code>{doctorData.config?.trustProxy ? 'true' : 'false'}</code></div>
+              <div style={{ marginTop: 6 }}>
+                request host: <code>{doctorData.request?.host || '—'}</code>
+              </div>
+              <div>
+                request origin: <code>{doctorData.request?.origin || '—'}</code>
+              </div>
+            </div>
+          </div>
+
+          {/* Meta store health */}
+          <div style={{ gridColumn: 'span 12', border: '1px solid var(--panel-border)', borderRadius: 12, padding: 10 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-main)', marginBottom: 8 }}>Meta stores</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {Object.entries(doctorData.meta || {}).map(([k, v]) => (
+                <div
+                  key={k}
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    gap: 10,
+                    padding: '8px 10px',
+                    border: '1px solid var(--panel-border)',
+                    borderRadius: 12,
+                  }}
+                >
+                  <div style={{ fontSize: 12, color: 'var(--text-main)' }}>
+                    <strong>{k}</strong> · <code>{v?.path || '—'}</code>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <span className={`pill pill--tiny ${v?.readable ? 'pill--ok' : 'pill--warn'}`}>{v?.readable ? 'R' : 'no R'}</span>
+                    <span className={`pill pill--tiny ${v?.writable ? 'pill--ok' : 'pill--warn'}`}>{v?.writable ? 'W' : 'no W'}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Largest spaces */}
+          <div style={{ gridColumn: 'span 12', border: '1px solid var(--panel-border)', borderRadius: 12, padding: 10 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-main)', marginBottom: 8 }}>Largest spaces (sample)</div>
+            {(doctorData.storage?.largestSpaces || []).length === 0 ? (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No space size data available.</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {doctorData.storage.largestSpaces.map((s) => (
+                  <div
+                    key={s.slug}
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      gap: 10,
+                      padding: '8px 10px',
+                      border: '1px solid var(--panel-border)',
+                      borderRadius: 12,
+                    }}
+                  >
+                    <div style={{ fontSize: 12, color: 'var(--text-main)' }}>
+                      <strong>{s.slug}</strong> · quota <code>{s.quotaMb ?? '—'}MB</code> · used{' '}
+                      <code>{s.usedMb != null ? `${s.usedMb}MB` : '—'}</code>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                      <span className="pill pill--tiny">{s.ownerUserId ? `owner ${s.ownerUserId}` : 'no ownerUserId'}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </>
+    )}
+  </div>
+)}
+
+        {/* User Drawer */}
+        {drawerOpen && (
+          <div
+            style={{
+              position: 'fixed',
+              inset: 0,
+              background: 'rgba(0,0,0,0.45)',
+              zIndex: 2000,
+              display: 'flex',
+              justifyContent: 'flex-end',
+            }}
+            onClick={closeUserDrawer}
+          >
+            <div
+              style={{
+                width: 'min(520px, 92vw)',
+                height: '100%',
+                background: 'var(--bg-main)',
+                borderLeft: '1px solid var(--panel-border)',
+                boxShadow: '0 0 24px rgba(0,0,0,0.35)',
+                padding: 14,
+                boxSizing: 'border-box',
+                overflowY: 'auto',
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center', justifyContent: 'space-between' }}>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-main)' }}>User</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{drawerUserId || '—'}</div>
+                </div>
+                <button type="button" className="button small" onClick={closeUserDrawer} disabled={drawerLoading}>
+                  Close
+                </button>
+              </div>
+
+              {drawerLoading ? (
+                <div style={{ marginTop: 10, fontSize: 12, color: 'var(--text-muted)' }}>Loading…</div>
+              ) : drawerError ? (
+                <div style={{ marginTop: 10, fontSize: 12, color: 'var(--danger)' }}>{drawerError}</div>
+              ) : !drawerUser ? (
+                <div style={{ marginTop: 10, fontSize: 12, color: 'var(--text-muted)' }}>No user loaded.</div>
+              ) : (
+                <>
+                  <div style={{ marginTop: 12, border: '1px solid var(--panel-border)', borderRadius: 12, padding: 10 }}>
+                    <div style={{ fontSize: 13, color: 'var(--text-main)' }}>
+                      <strong>{bestHandle(drawerUser)}</strong>
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6 }}>
+                      email: <code>{drawerUser.email || drawerUser.pendingEmail || '—'}</code>
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6 }}>
+                      discord: <code>{drawerUser.discordId || '—'}</code>
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6 }}>
+                      last login: {fmtWhen(drawerUser.lastLoginAt)}
+                    </div>
+                  </div>
+
+                  <div style={{ marginTop: 12, border: '1px solid var(--panel-border)', borderRadius: 12, padding: 10 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-main)', marginBottom: 8 }}>
+                      Quick actions
+                    </div>
+
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                      <button type="button" className="button small" onClick={() => openSessionsModal(drawerUser)}>
+                        Sessions
+                      </button>
+
+                      <button type="button" className="button small" onClick={() => openUserDrawer(drawerUser.id)}>
+                        Refresh user
+                      </button>
+
+                      <button
+                        type="button"
+                        className="button small"
+                        onClick={() => {
+                          try {
+                            navigator.clipboard?.writeText?.(String(drawerUser.id));
+                            setStatusMsg('Copied userId.');
+                          } catch {}
+                        }}
+                      >
+                        Copy userId
+                      </button>
+                    </div>
+                  </div>
+
+                  {Array.isArray(drawerUser.spaces) && drawerUser.spaces.length > 0 && (
+                    <div style={{ marginTop: 12, border: '1px solid var(--panel-border)', borderRadius: 12, padding: 10 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-main)', marginBottom: 8 }}>
+                        Spaces ({drawerUser.spaces.length})
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {drawerUser.spaces.map((s) => (
+                          <div key={s.slug} style={{ border: '1px solid var(--panel-border)', borderRadius: 10, padding: 8 }}>
+                            <div style={{ fontSize: 12, color: 'var(--text-main)' }}>
+                              <strong>{s.slug}</strong> <span style={{ color: 'var(--text-muted)' }}>· {s.quotaMb ?? '—'} MB</span>
+                            </div>
+                            <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                              <a className="button small" href={s.iframeUrl} target="_blank" rel="noreferrer">
+                                Open live
+                              </a>
+                              <a className="button small" href={s.paywallPreviewUrl} target="_blank" rel="noreferrer">
+                                Paywall preview
+                              </a>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Sessions modal */}
+        {sessionsOpen && sessionsUser && (
+          <div className="preview-modal-backdrop" onClick={closeSessionsModal}>
+            <div className="preview-modal" onClick={(e) => e.stopPropagation()} style={{ width: 'min(860px, 92vw)', maxWidth: 860, height: 'auto', minHeight: 0 }}>
+              <div className="preview-modal-header">
+                <div>
+                  <div className="preview-modal-title">Sessions</div>
+                  <div className="preview-modal-subtitle">
+                    {bestHandle(sessionsUser) || sessionsUser.id} · {sessionsUser.id}
+                  </div>
+                </div>
+                <button type="button" className="preview-modal-close" onClick={closeSessionsModal} aria-label="Close">
+                  ×
+                </button>
+              </div>
+
+              <div className="preview-modal-body" style={{ display: 'block', padding: 16 }}>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}>
+                  <button type="button" className="button small" onClick={refreshSessions} disabled={sessionsLoading || !!revokingSid}>
+                    {sessionsLoading ? 'Loading…' : 'Refresh'}
+                  </button>
+
+                  <button type="button" className="button small primary" onClick={revokeAllSessions} disabled={sessionsLoading || !!revokingSid}>
+                    {revokingSid === '__all__' ? 'Revoking…' : 'Revoke all'}
+                  </button>
+
+                  <button type="button" className="button small" onClick={() => { loadAudit(); loadActivity(); }} disabled={sessionsLoading || !!revokingSid}>
+                    Refresh logs
+                  </button>
+
+                  <div style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--text-muted)' }}>
+                    {sessionsList.length} session(s)
+                  </div>
+                </div>
+
+                {sessionsError && (
+                  <div style={{ fontSize: 12, color: 'var(--danger)', marginBottom: 10 }}>
+                    {sessionsError}
+                  </div>
+                )}
+
+                {sessionsList.length === 0 && !sessionsLoading ? (
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No sessions found.</div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {sessionsList.map((s) => (
+                      <div key={s.id} style={{ border: '1px solid var(--panel-border)', borderRadius: 12, padding: 10 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+                          <div style={{ fontSize: 12, color: 'var(--text-main)' }}>
+                            <strong>{s.id}</strong>
+                            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                              created: {fmtWhen(s.createdAt)} · ip: <code>{s.ip || '—'}</code>
+                            </div>
+                            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                              ua: <code style={{ whiteSpace: 'pre-wrap' }}>{s.userAgent || '—'}</code>
+                            </div>
+                          </div>
+
+                          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                            <button type="button" className="button small" onClick={() => revokeOneSession(s.id)} disabled={!!revokingSid}>
+                              {revokingSid === s.id ? 'Revoking…' : 'Revoke'}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div style={{ marginTop: 10, fontSize: 11, color: 'var(--text-muted)' }}>
+                  Revoking removes the server-side session record. The user will be logged out on their next request.
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

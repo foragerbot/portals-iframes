@@ -950,7 +950,6 @@ async function getSpaceUsage(space) {
   return { usedBytes, usedMb, quotaMb };
 }
 
-
 // ───────────────── Users / auth helpers ─────────────────
 
 function isValidEmail(email) {
@@ -3661,9 +3660,6 @@ app.post('/api/spaces/request', requireUser, requireEditorOrigin, requireVerifie
 });
 
 
-
-// Create a new space: POST /api/admin/spaces
-// Body: { slug, quotaMb?, ownerEmail?, ownerUserId? }
 app.post('/api/admin/spaces', requireUser, requireAdminUser, requireEditorOrigin, async (req, res, next) => {
   try {
     await ensureSpacesRoot();
@@ -3679,9 +3675,6 @@ app.post('/api/admin/spaces', requireUser, requireAdminUser, requireEditorOrigin
 
     const users = await loadUsersMeta();
 
-    // Optional owner binding:
-    // - If ownerUserId provided: bind to that user (preferred)
-    // - Else if ownerEmail provided: bind by email (legacy)
     let resolvedOwnerUserId = null;
     let resolvedOwnerEmail = null;
 
@@ -3689,30 +3682,20 @@ app.post('/api/admin/spaces', requireUser, requireAdminUser, requireEditorOrigin
       const uid = String(ownerUserId).trim();
       const u = users.find((x) => x && x.id === uid) || null;
       if (!u) {
-        return res.status(400).json({
-          error: 'bad_owner_user',
-          message: 'ownerUserId does not match any user.',
-        });
+        return res.status(400).json({ error: 'bad_owner_user', message: 'ownerUserId does not match any user.' });
       }
-
       resolvedOwnerUserId = u.id;
 
-      // If user has a verified email, store it; otherwise leave ownerEmail null
-const em = String(u.email || '').trim().toLowerCase();
-const isVerified = !!u.emailVerifiedAt;
-resolvedOwnerEmail = (isVerified && em && isValidEmail(em)) ? em : null;
+      const em = String(u.email || '').trim().toLowerCase();
+      const isVerified = !!u.emailVerifiedAt;
+      resolvedOwnerEmail = (isVerified && em && isValidEmail(em)) ? em : null;
     } else if (ownerEmail != null && String(ownerEmail).trim() !== '') {
       const raw = String(ownerEmail).trim().toLowerCase();
       if (!isValidEmail(raw)) {
-        return res.status(400).json({
-          error: 'bad_owner_email',
-          message: 'ownerEmail must be a valid email address.',
-        });
+        return res.status(400).json({ error: 'bad_owner_email', message: 'ownerEmail must be a valid email address.' });
       }
 
       resolvedOwnerEmail = raw;
-
-      // Resolve owner user by email (best-effort)
       const u = users.find((x) => String(x?.email || '').trim().toLowerCase() === resolvedOwnerEmail) || null;
       resolvedOwnerUserId = u ? u.id : null;
     }
@@ -3726,11 +3709,7 @@ resolvedOwnerEmail = (isVerified && em && isValidEmail(em)) ? em : null;
     const dirPath = path.join(SPACES_ROOT, slug);
 
     if (fsSync.existsSync(dirPath)) {
-      return res.status(409).json({
-        error: 'dir_exists',
-        slug,
-        message: 'directory already exists on disk',
-      });
+      return res.status(409).json({ error: 'dir_exists', slug, message: 'directory already exists on disk' });
     }
 
     await fs.mkdir(dirPath, { recursive: true });
@@ -3742,41 +3721,11 @@ resolvedOwnerEmail = (isVerified && em && isValidEmail(em)) ? em : null;
   <title>${slug} overlay</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    html, body {
-      margin: 0;
-      padding: 0;
-      height: 100%;
-      width: 100%;
-      background: transparent;
-      color: #e5e7eb;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-    body {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: rgba(15, 23, 42, 0.6);
-      box-sizing: border-box;
-    }
-    .hud {
-      padding: 12px 16px;
-      border-radius: 8px;
-      border: 1px solid rgba(148, 163, 184, 0.7);
-      background: rgba(15, 23, 42, 0.9);
-      box-shadow: 0 0 24px rgba(59, 130, 246, 0.35);
-    }
-    .hud-title {
-      font-size: 14px;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: #93c5fd;
-      margin: 0 0 4px;
-    }
-    .hud-body {
-      font-size: 13px;
-      color: #e5e7eb;
-      margin: 0;
-    }
+    html, body { margin:0; padding:0; height:100%; width:100%; background:transparent; font-family:system-ui,-apple-system,"Segoe UI",sans-serif; }
+    body { display:flex; align-items:center; justify-content:center; background:rgba(15,23,42,.6); color:#e5e7eb; }
+    .hud { padding:12px 16px; border-radius:10px; border:1px solid rgba(148,163,184,.7); background:rgba(15,23,42,.9); box-shadow:0 0 24px rgba(59,130,246,.35); }
+    .hud-title { font-size:14px; letter-spacing:.12em; text-transform:uppercase; color:#93c5fd; margin:0 0 4px; }
+    .hud-body { font-size:13px; margin:0; color:#e5e7eb; }
   </style>
 </head>
 <body>
@@ -3804,6 +3753,13 @@ resolvedOwnerEmail = (isVerified && em && isValidEmail(em)) ? em : null;
     spaces.push(spaceRecord);
     await saveSpacesMeta(spaces);
 
+    // ✅ AUDIT
+    await appendAdminAudit(req, {
+      action: 'space_created',
+      target: { type: 'space', slug, userId: resolvedOwnerUserId || null, email: resolvedOwnerEmail || null },
+      detail: { quotaMb: spaceRecord.quotaMb },
+    });
+
     res.setHeader('Cache-Control', 'no-store');
     return res.status(201).json({ ok: true, space: spaceRecord });
   } catch (err) {
@@ -3812,26 +3768,18 @@ resolvedOwnerEmail = (isVerified && em && isValidEmail(em)) ? em : null;
 });
 
 
-// Admin: approve a workspace request and create a space for the user
-// POST /api/admin/space-requests/:id/approve
-// body: { slug, quotaMb? }
 app.post('/api/admin/space-requests/:id/approve', requireUser, requireAdminUser, requireEditorOrigin, async (req, res, next) => {
   try {
     const { id } = req.params;
     const rawSlug = (req.body?.slug || '').toString();
 
-    // Normalize slug: trim, lowercase, replace invalid chars with '-'
     let slug = rawSlug.trim().toLowerCase();
-    slug = slug.replace(/[^a-z0-9-]/g, '-');   // anything not a-z,0-9,- => '-'
-    slug = slug.replace(/-+/g, '-');           // collapse multiple dashes
-    slug = slug.replace(/^-+|-+$/g, '');       // trim leading/trailing dashes
+    slug = slug.replace(/[^a-z0-9-]/g, '-');
+    slug = slug.replace(/-+/g, '-');
+    slug = slug.replace(/^-+|-+$/g, '');
 
     if (!slug || !/^[a-z0-9-]{3,32}$/.test(slug)) {
-      console.warn('[workspace-requests] bad_slug from admin input:', rawSlug, 'normalized to:', slug);
-      return res.status(400).json({
-        error: 'bad_slug',
-        message: 'Slug must be between 3 and 32 characters in length.'
-      });
+      return res.status(400).json({ error: 'bad_slug', message: 'Slug must be between 3 and 32 characters in length.' });
     }
 
     const quotaMbRaw = req.body?.quotaMb;
@@ -3839,66 +3787,50 @@ app.post('/api/admin/space-requests/:id/approve', requireUser, requireAdminUser,
 
     const requests = await loadWorkspaceRequests();
     const idx = requests.findIndex((r) => r.id === id);
-    if (idx === -1) {
-      return res.status(404).json({ error: 'request_not_found' });
-    }
+    if (idx === -1) return res.status(404).json({ error: 'request_not_found' });
 
     const reqRecord = requests[idx];
     if (reqRecord.status !== 'pending') {
-      return res.status(400).json({
-        error: 'bad_status',
-        message: `Request is already ${reqRecord.status}`
-      });
+      return res.status(400).json({ error: 'bad_status', message: `Request is already ${reqRecord.status}` });
     }
 
     const users = await loadUsersMeta();
     const normReqEmail = String(reqRecord.email || '').trim().toLowerCase();
-const user =
-  users.find((u) => u && u.id === reqRecord.userId) ||
-  users.find((u) => u && String(u.email || '').trim().toLowerCase() === normReqEmail) ||
-  users.find((u) => u && String(u.pendingEmail || '').trim().toLowerCase() === normReqEmail) ||
-  null;
+
+    const user =
+      users.find((u) => u && u.id === reqRecord.userId) ||
+      users.find((u) => u && String(u.email || '').trim().toLowerCase() === normReqEmail) ||
+      users.find((u) => u && String(u.pendingEmail || '').trim().toLowerCase() === normReqEmail) ||
+      null;
+
     if (!user) {
-      return res.status(404).json({
-        error: 'user_not_found',
-        message: 'User referenced in request could not be found'
-      });
+      return res.status(404).json({ error: 'user_not_found', message: 'User referenced in request could not be found' });
     }
 
+    // Optional billing patch on approve
     const billingIn = req.body?.billing || null;
+    if (billingIn && typeof billingIn === 'object') {
+      user.billing = user.billing || {};
+      if ('comped' in billingIn) user.billing.comped = Boolean(billingIn.comped);
+      if ('paidUntil' in billingIn) user.billing.paidUntil = billingIn.paidUntil ? String(billingIn.paidUntil) : null;
+      if ('tier' in billingIn) user.billing.tier = billingIn.tier ? String(billingIn.tier) : null;
+      if ('notes' in billingIn) user.billing.notes = billingIn.notes ? String(billingIn.notes) : null;
+    }
 
-if (billingIn && typeof billingIn === 'object') {
-  user.billing = user.billing || {};
-  if ('comped' in billingIn) user.billing.comped = Boolean(billingIn.comped);
-  if ('paidUntil' in billingIn) user.billing.paidUntil = billingIn.paidUntil ? String(billingIn.paidUntil) : null;
-  if ('tier' in billingIn) user.billing.tier = billingIn.tier ? String(billingIn.tier) : null;
+    user.status = 'active';
+    user.updatedAt = new Date().toISOString();
+    await saveUsersMeta(users);
 
-  // optional notes
-  if ('notes' in billingIn) user.billing.notes = billingIn.notes ? String(billingIn.notes) : null;
-}
-
-user.status = 'active';
-user.updatedAt = new Date().toISOString();
-
-await saveUsersMeta(users);
-
-    // Make sure we don't already have a space with this slug
     const spaces = await loadSpacesMeta();
     if (spaces.find((s) => s.slug === slug)) {
-      return res.status(409).json({
-        error: 'space_exists',
-        message: 'A space with this slug already exists.'
-      });
+      return res.status(409).json({ error: 'space_exists', message: 'A space with this slug already exists.' });
     }
 
     const now = new Date().toISOString();
     const dirPath = path.join(SPACES_ROOT, slug);
 
     if (fsSync.existsSync(dirPath)) {
-      return res.status(409).json({
-        error: 'dir_exists',
-        message: 'Directory for this slug already exists.'
-      });
+      return res.status(409).json({ error: 'dir_exists', message: 'Directory for this slug already exists.' });
     }
 
     await fs.mkdir(dirPath, { recursive: true });
@@ -3909,17 +3841,22 @@ await saveUsersMeta(users);
   <meta charset="utf-8">
   <title>${slug} overlay</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>/* ...(same as before)... */</style>
+  <style>
+    html, body { margin:0; padding:0; height:100%; width:100%; background:transparent; font-family:system-ui,-apple-system,"Segoe UI",sans-serif; }
+    body { display:flex; align-items:center; justify-content:center; background:rgba(15,23,42,.6); color:#e5e7eb; }
+    .hud { padding:12px 16px; border-radius:10px; border:1px solid rgba(148,163,184,.7); background:rgba(15,23,42,.9); box-shadow:0 0 24px rgba(59,130,246,.35); }
+    .hud-title { font-size:14px; letter-spacing:.12em; text-transform:uppercase; color:#93c5fd; margin:0 0 4px; }
+    .hud-body { font-size:13px; margin:0; color:#e5e7eb; }
+  </style>
 </head>
 <body>
   <div class="hud">
     <p class="hud-title">Space: ${slug}</p>
-    <p class="hud-body">It's alive! Wire this up as an iFrame in your Portals space.</p>
+    <p class="hud-body">Your overlay is alive. Wire this up as an iFrame in your Portals space!</p>
   </div>
 </body>
 </html>
 `;
-
     await fs.writeFile(path.join(dirPath, 'index.html'), starterHtml, 'utf8');
 
     const spaceRecord = {
@@ -3930,7 +3867,7 @@ await saveUsersMeta(users);
       createdAt: now,
       updatedAt: now,
       status: 'active',
-      ownerEmail: (user.email || '').trim().toLowerCase(),
+      ownerEmail: (user.email || '').trim().toLowerCase() || null,
       ownerUserId: user.id,
     };
 
@@ -3942,32 +3879,89 @@ await saveUsersMeta(users);
       status: 'approved',
       updatedAt: now,
       approvedAt: now,
-      spaceSlug: slug
+      spaceSlug: slug,
     };
     requests[idx] = updatedReq;
     await saveWorkspaceRequests(requests);
 
-    console.log('[workspace-requests] approved', {
-      requestId: id,
-      userId: user.id,
-      email: user.email,
-      slug
+    // ✅ AUDIT
+    await appendAdminAudit(req, {
+      action: 'space_request_approved',
+      target: { type: 'workspace_request', id, userId: user.id, email: reqRecord.email || null, slug },
+      detail: { quotaMb, billingPatch: billingIn || null },
     });
+
     try {
       await sendWorkspaceApprovalEmailToUser(user, spaceRecord, updatedReq);
-    } catch (mailErr) {
-      // helper logs internally; don't block the approval
-    }
-    res.json({
-      ok: true,
-      request: updatedReq,
-      space: spaceRecord
-    });
+    } catch {}
+
+    return res.json({ ok: true, request: updatedReq, space: spaceRecord });
   } catch (err) {
     console.error('[workspace-requests] error approving request', err);
     next(err);
   }
 });
+
+app.post('/api/admin/space-requests/:id/reject', requireUser, requireAdminUser, requireEditorOrigin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const reason = (req.body?.reason || '').toString().trim();
+
+    const requests = await loadWorkspaceRequests();
+    const idx = requests.findIndex((r) => r.id === id);
+    if (idx === -1) return res.status(404).json({ error: 'request_not_found' });
+
+    const reqRecord = requests[idx];
+    if (reqRecord.status !== 'pending') {
+      return res.status(400).json({ error: 'bad_status', message: `Request is already ${reqRecord.status}` });
+    }
+
+    const nowIso = new Date().toISOString();
+    const updatedReq = {
+      ...reqRecord,
+      status: 'rejected',
+      updatedAt: nowIso,
+      rejectedAt: nowIso,
+      rejectReason: reason || null,
+    };
+
+    requests[idx] = updatedReq;
+    await saveWorkspaceRequests(requests);
+
+    // ✅ AUDIT
+    await appendAdminAudit(req, {
+      action: 'space_request_rejected',
+      target: { type: 'workspace_request', id, userId: updatedReq.userId || null, email: updatedReq.email || null },
+      detail: { reason: updatedReq.rejectReason || null },
+    });
+
+    // Best-effort email
+    try {
+      const users = await loadUsersMeta();
+      const byId = users.find((u) => u && u.id === updatedReq.userId) || null;
+
+      const normReqEmail = String(updatedReq.email || '').trim().toLowerCase();
+      const byEmail =
+        !byId && normReqEmail
+          ? users.find((u) => (u?.email || '').trim().toLowerCase() === normReqEmail) || null
+          : null;
+
+      const user = byId || byEmail;
+
+      if (user) {
+        await sendWorkspaceRejectionEmailToUser(user, updatedReq);
+      }
+    } catch (mailErr) {
+      console.error('[workspace-email] failed to send rejection email (non-fatal)', mailErr);
+    }
+
+    return res.json({ ok: true, request: updatedReq });
+  } catch (err) {
+    console.error('[workspace-requests] error rejecting request', err);
+    next(err);
+  }
+});
+
 
 // Admin: list workspace requests
 // GET /api/admin/space-requests?status=pending|approved|rejected|all
@@ -4089,10 +4083,7 @@ app.get('/api/admin/users/search', requireUser, requireAdminUser, async (req, re
   }
 });
 
-
-// Admin-only: send an email to a user by userId (Discord-admin session)
-// POST /api/admin/users/:id/email
-// body: { subject: string, text?: string, html?: string, from?: string }
+// ───────────────── Admin: Email Templates And Comms ─────────────────
 app.post('/api/admin/users/:id/email', requireUser, requireAdminUser, requireEditorOrigin, async (req, res, next) => {
   try {
     if (!SENDGRID_API_KEY || !SENDGRID_FROM) {
@@ -4108,22 +4099,17 @@ app.post('/api/admin/users/:id/email', requireUser, requireAdminUser, requireEdi
     const subject = String(req.body?.subject || '').trim();
     const text = req.body?.text != null ? String(req.body.text) : '';
     const html = req.body?.html != null ? String(req.body.html) : '';
-
     const from = String(req.body?.from || SENDGRID_FROM).trim();
 
     if (!subject) return res.status(400).json({ error: 'missing_subject' });
     if (!text && !html) {
-      return res.status(400).json({
-        error: 'missing_body',
-        message: 'Provide at least one of: text, html',
-      });
+      return res.status(400).json({ error: 'missing_body', message: 'Provide at least one of: text, html' });
     }
 
     const users = await loadUsersMeta();
     const user = users.find((u) => u && u.id === userId) || null;
     if (!user) return res.status(404).json({ error: 'user_not_found' });
 
-    // Prefer verified email; fallback to pending email (lets you message “verify this”)
     const to = String(user.email || user.pendingEmail || '').trim().toLowerCase();
     if (!to || !isValidEmail(to)) {
       return res.status(400).json({
@@ -4148,6 +4134,19 @@ app.post('/api/admin/users/:id/email', requireUser, requireAdminUser, requireEdi
       ...(html ? { html } : {}),
     });
 
+    // ✅ AUDIT (don’t store full body; store a safe preview + flags)
+    await appendAdminAudit(req, {
+      action: 'admin_email_sent',
+      target: { type: 'user', id: userId, email: to },
+      detail: {
+        subject,
+        from,
+        mode: html ? 'html' : 'text',
+        textPreview: text ? safeStr(text, 280) : null,
+        htmlPreview: html ? safeStr(html, 280) : null,
+      },
+    });
+
     console.log('[admin-email] sent', { to, userId, subject });
     return res.json({ ok: true, to, userId });
   } catch (err) {
@@ -4155,7 +4154,6 @@ app.post('/api/admin/users/:id/email', requireUser, requireAdminUser, requireEdi
     next(err);
   }
 });
-
 
 async function sendWelcomeEmailToUser(user) {
   if (!SENDGRID_API_KEY || !SENDGRID_FROM) {
@@ -4213,85 +4211,314 @@ async function sendWelcomeEmailToUser(user) {
   console.log('[welcome-email] sent welcome email to', to);
 }
 
-// Admin: reject a workspace request
-// POST /api/admin/space-requests/:id/reject
-// body: { reason? }
-//
-// ✅ FIXED: now loads the user and sends a rejection email (best-effort)
-app.post('/api/admin/space-requests/:id/reject', requireUser, requireAdminUser, requireEditorOrigin, async (req, res, next) => {
+const EMAIL_TEMPLATES_META_PATH =
+  process.env.EMAIL_TEMPLATES_META_PATH ||
+  path.join(path.dirname(USERS_META_PATH), 'emailTemplates.meta.json');
+
+async function loadEmailTemplates() {
+  return readJsonArray(EMAIL_TEMPLATES_META_PATH);
+}
+async function saveEmailTemplates(arr) {
+  return writeJsonArray(EMAIL_TEMPLATES_META_PATH, arr);
+}
+
+function safeStr(x, max = 8000) {
+  const s = x == null ? '' : String(x);
+  return s.length > max ? s.slice(0, max) + '…' : s;
+}
+
+// Very small template renderer: replaces {{key}} with vars[key]
+function renderTemplate(str, vars) {
+  const s = String(str || '');
+  return s.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_, key) => {
+    const v = vars && Object.prototype.hasOwnProperty.call(vars, key) ? vars[key] : '';
+    return v == null ? '' : String(v);
+  });
+}
+
+function buildTemplateVars({ user, space, appBaseUrl, iframeBaseUrl }) {
+  const u = user || {};
+  const s = space || null;
+
+  const handle =
+    (u.discordUsername ? `@${u.discordUsername}` : '') ||
+    (u.discordGlobalName ? String(u.discordGlobalName) : '') ||
+    (u.email ? String(u.email) : '') ||
+    (u.pendingEmail ? String(u.pendingEmail) : '') ||
+    (u.id ? String(u.id) : '');
+
+  const slug = s?.slug ? String(s.slug) : '';
+  const iframeUrl = slug && iframeBaseUrl
+    ? `${iframeBaseUrl}/p/${encodeURIComponent(slug)}/index.html`
+    : (slug ? `/p/${encodeURIComponent(slug)}/index.html` : '');
+
+  const paywallPreviewUrl = iframeUrl
+    ? (iframeUrl.includes('?') ? `${iframeUrl}&paywallPreview=1` : `${iframeUrl}?paywallPreview=1`)
+    : '';
+
+  return {
+    // user
+    userId: u.id || '',
+    email: u.email || '',
+    pendingEmail: u.pendingEmail || '',
+    discordId: u.discordId || '',
+    discordUsername: u.discordUsername || '',
+    discordGlobalName: u.discordGlobalName || '',
+    handle,
+
+    // app + iframe
+    appUrl: appBaseUrl || '',
+    iframeBase: iframeBaseUrl || '',
+    slug,
+    iframeUrl,
+    paywallPreviewUrl,
+
+    // misc
+    nowIso: new Date().toISOString(),
+  };
+}
+
+// GET list
+app.get('/api/admin/email-templates', requireUser, requireAdminUser, async (req, res, next) => {
   try {
-    const { id } = req.params;
-    const reason = (req.body?.reason || '').toString().trim();
+    const templates = await loadEmailTemplates().catch(() => []);
+    const list = Array.isArray(templates) ? templates.filter(Boolean) : [];
 
-    const requests = await loadWorkspaceRequests();
-    const idx = requests.findIndex((r) => r.id === id);
-    if (idx === -1) {
-      return res.status(404).json({ error: 'request_not_found' });
-    }
+    // newest first
+    list.sort((a, b) => (Date.parse(b.updatedAt || b.createdAt || '') || 0) - (Date.parse(a.updatedAt || a.createdAt || '') || 0));
 
-    const reqRecord = requests[idx];
-    if (reqRecord.status !== 'pending') {
-      return res.status(400).json({
-        error: 'bad_status',
-        message: `Request is already ${reqRecord.status}`,
-      });
-    }
-
-    const nowIso = new Date().toISOString();
-    const updatedReq = {
-      ...reqRecord,
-      status: 'rejected',
-      updatedAt: nowIso,
-      rejectedAt: nowIso,
-      rejectReason: reason || null,
-    };
-
-    // Persist request update
-    requests[idx] = updatedReq;
-    await saveWorkspaceRequests(requests);
-
-    console.log('[workspace-requests] rejected', {
-      requestId: id,
-      userId: updatedReq.userId,
-      email: updatedReq.email || null,
-      reason: updatedReq.rejectReason || null,
-    });
-
-    // ✅ Best-effort: load user and email them
-    try {
-      const users = await loadUsersMeta();
-
-      const byId =
-        users.find((u) => u && u.id === updatedReq.userId) || null;
-
-      const normReqEmail = String(updatedReq.email || '').trim().toLowerCase();
-      const byEmail =
-        !byId && normReqEmail
-          ? users.find((u) => (u?.email || '').trim().toLowerCase() === normReqEmail) || null
-          : null;
-
-      const user = byId || byEmail;
-
-      if (user) {
-        await sendWorkspaceRejectionEmailToUser(user, updatedReq);
-      } else {
-        console.warn('[workspace-email] rejection email skipped (user not found)', {
-          requestId: updatedReq.id,
-          userId: updatedReq.userId,
-          email: updatedReq.email || null,
-        });
-      }
-    } catch (mailErr) {
-      // Don't block the reject action if email fails
-      console.error('[workspace-email] failed to send rejection email (non-fatal)', mailErr);
-    }
-
-    return res.json({ ok: true, request: updatedReq });
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok: true, templates: list });
   } catch (err) {
-    console.error('[workspace-requests] error rejecting request', err);
     next(err);
   }
 });
+
+// POST create
+app.post('/api/admin/email-templates', requireUser, requireAdminUser, requireEditorOrigin, async (req, res, next) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    const subject = String(req.body?.subject || '').trim();
+    const modeRaw = String(req.body?.mode || 'text').trim().toLowerCase(); // text|html|both
+    const text = req.body?.text != null ? String(req.body.text) : '';
+    const html = req.body?.html != null ? String(req.body.html) : '';
+
+    if (!name) return res.status(400).json({ error: 'missing_name' });
+    if (!subject) return res.status(400).json({ error: 'missing_subject' });
+
+    const mode = (modeRaw === 'html' || modeRaw === 'both') ? modeRaw : 'text';
+
+    if (mode === 'text' && !text.trim()) return res.status(400).json({ error: 'missing_text' });
+    if (mode === 'html' && !html.trim()) return res.status(400).json({ error: 'missing_html' });
+    if (mode === 'both' && !text.trim() && !html.trim()) return res.status(400).json({ error: 'missing_body' });
+
+    const nowIso = new Date().toISOString();
+
+    const templates = await loadEmailTemplates().catch(() => []);
+    const arr = Array.isArray(templates) ? templates : [];
+
+    const rec = {
+      id: generateId('et_'),
+      name,
+      subject,
+      mode,
+      text,
+      html,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      createdByUserId: req.user?.id || null,
+      updatedByUserId: req.user?.id || null,
+    };
+
+    arr.push(rec);
+    await saveEmailTemplates(arr);
+
+    await appendAdminAudit(req, {
+      action: 'email_template_created',
+      target: { type: 'email_template', id: rec.id },
+      detail: { name: rec.name, mode: rec.mode },
+    });
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(201).json({ ok: true, template: rec });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST update
+app.post('/api/admin/email-templates/:id', requireUser, requireAdminUser, requireEditorOrigin, async (req, res, next) => {
+  try {
+    const id = String(req.params.id || '').trim();
+    if (!id) return res.status(400).json({ error: 'bad_id' });
+
+    const templates = await loadEmailTemplates().catch(() => []);
+    const arr = Array.isArray(templates) ? templates : [];
+
+    const idx = arr.findIndex((t) => t && t.id === id);
+    if (idx === -1) return res.status(404).json({ error: 'template_not_found' });
+
+    const prev = arr[idx];
+
+    const name = ('name' in (req.body || {})) ? String(req.body.name || '').trim() : prev.name;
+    const subject = ('subject' in (req.body || {})) ? String(req.body.subject || '').trim() : prev.subject;
+    const modeRaw = ('mode' in (req.body || {})) ? String(req.body.mode || '').trim().toLowerCase() : prev.mode;
+    const text = ('text' in (req.body || {})) ? String(req.body.text || '') : prev.text;
+    const html = ('html' in (req.body || {})) ? String(req.body.html || '') : prev.html;
+
+    if (!name) return res.status(400).json({ error: 'missing_name' });
+    if (!subject) return res.status(400).json({ error: 'missing_subject' });
+
+    const mode = (modeRaw === 'html' || modeRaw === 'both') ? modeRaw : 'text';
+
+    if (mode === 'text' && !text.trim()) return res.status(400).json({ error: 'missing_text' });
+    if (mode === 'html' && !html.trim()) return res.status(400).json({ error: 'missing_html' });
+    if (mode === 'both' && !text.trim() && !html.trim()) return res.status(400).json({ error: 'missing_body' });
+
+    const nowIso = new Date().toISOString();
+
+    const nextRec = {
+      ...prev,
+      name,
+      subject,
+      mode,
+      text,
+      html,
+      updatedAt: nowIso,
+      updatedByUserId: req.user?.id || null,
+    };
+
+    arr[idx] = nextRec;
+    await saveEmailTemplates(arr);
+
+    await appendAdminAudit(req, {
+      action: 'email_template_updated',
+      target: { type: 'email_template', id },
+      detail: { name: nextRec.name, mode: nextRec.mode },
+    });
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok: true, template: nextRec });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE
+app.delete('/api/admin/email-templates/:id', requireUser, requireAdminUser, requireEditorOrigin, async (req, res, next) => {
+  try {
+    const id = String(req.params.id || '').trim();
+    if (!id) return res.status(400).json({ error: 'bad_id' });
+
+    const templates = await loadEmailTemplates().catch(() => []);
+    const arr = Array.isArray(templates) ? templates : [];
+
+    const idx = arr.findIndex((t) => t && t.id === id);
+    if (idx === -1) return res.status(404).json({ error: 'template_not_found' });
+
+    const removed = arr[idx];
+    const nextArr = arr.filter((t) => t && t.id !== id);
+
+    await saveEmailTemplates(nextArr);
+
+    await appendAdminAudit(req, {
+      action: 'email_template_deleted',
+      target: { type: 'email_template', id },
+      detail: { name: removed?.name || null },
+    });
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok: true, deleted: id });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST send using template
+// body: { userId, spaceSlug? }
+// - picks recipient from user.email or user.pendingEmail
+// - renders {{vars}} into subject/text/html
+app.post('/api/admin/email-templates/:id/send', requireUser, requireAdminUser, requireEditorOrigin, async (req, res, next) => {
+  try {
+    if (!SENDGRID_API_KEY || !SENDGRID_FROM) {
+      return res.status(503).json({
+        error: 'mail_disabled',
+        message: 'SendGrid is not configured (missing SENDGRID_API_KEY or SENDGRID_FROM).',
+      });
+    }
+
+    const id = String(req.params.id || '').trim();
+    if (!id) return res.status(400).json({ error: 'bad_id' });
+
+    const userId = String(req.body?.userId || '').trim();
+    if (!userId) return res.status(400).json({ error: 'missing_userId' });
+
+    const spaceSlug = req.body?.spaceSlug != null ? String(req.body.spaceSlug).trim() : '';
+
+    const templates = await loadEmailTemplates().catch(() => []);
+    const tpl = (Array.isArray(templates) ? templates : []).find((t) => t && t.id === id) || null;
+    if (!tpl) return res.status(404).json({ error: 'template_not_found' });
+
+    const users = await loadUsersMeta();
+    const user = (Array.isArray(users) ? users : []).find((u) => u && u.id === userId) || null;
+    if (!user) return res.status(404).json({ error: 'user_not_found' });
+
+    const to = String(user.email || user.pendingEmail || '').trim().toLowerCase();
+    if (!to || !isValidEmail(to)) {
+      return res.status(400).json({
+        error: 'user_missing_email',
+        message: 'User does not have a valid email on file.',
+      });
+    }
+
+    let space = null;
+    if (spaceSlug) {
+      const spaces = await loadSpacesMeta();
+      space = (Array.isArray(spaces) ? spaces : []).find((s) => s && s.slug === spaceSlug && s.status === 'active') || null;
+    }
+
+    const appBaseUrl = String(APP_BASE_URL || '').replace(/\/+$/, '');
+    const iframeBaseUrl = String(PUBLIC_IFRAME_BASE_URL || '').replace(/\/+$/, '');
+
+    const vars = buildTemplateVars({ user, space, appBaseUrl, iframeBaseUrl });
+
+    const subject = renderTemplate(tpl.subject, vars);
+    const text = tpl.mode === 'text' || tpl.mode === 'both' ? renderTemplate(tpl.text, vars) : '';
+    const html = tpl.mode === 'html' || tpl.mode === 'both' ? renderTemplate(tpl.html, vars) : '';
+
+    if (!subject.trim()) return res.status(400).json({ error: 'rendered_subject_empty' });
+    if (tpl.mode === 'text' && !text.trim()) return res.status(400).json({ error: 'rendered_text_empty' });
+    if (tpl.mode === 'html' && !html.trim()) return res.status(400).json({ error: 'rendered_html_empty' });
+
+    await sgMail.send({
+      to,
+      from: SENDGRID_FROM,
+      subject,
+      ...(text ? { text } : {}),
+      ...(html ? { html } : {}),
+    });
+
+    await appendAdminAudit(req, {
+      action: 'email_template_sent',
+      target: { type: 'user', id: userId, email: to },
+      detail: {
+        templateId: id,
+        templateName: tpl.name || null,
+        mode: tpl.mode,
+        spaceSlug: spaceSlug || null,
+        subject: safeStr(subject, 200),
+        textPreview: text ? safeStr(text, 280) : null,
+        htmlPreview: html ? safeStr(html, 280) : null,
+      },
+    });
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok: true, to, userId, templateId: id, mode: tpl.mode });
+  } catch (err) {
+    next(err);
+  }
+});
+
 
 // ───────────────── Public space serving (static) ─────────────────
 
@@ -4312,16 +4539,26 @@ app.use('/p/:slug', enforcePublicHostForP, portalsEmbedHeaders, async (req, res,
       return res.status(404).send('Space not found');
     }
 
-    // ✅ If this space belongs to a user, enforce billing here.
-    // If ownerEmail is null (admin-created “public marketing space”), we skip gating.
-    if (space.ownerEmail) {
-      const ownerUser = await findUserByEmail(space.ownerEmail);
+// ✅ If this space belongs to a user, enforce billing here.
+// If ownerEmail is null (admin-created “public marketing space”), we skip gating.
+if (space.ownerEmail) {
+  // ✅ Paywall preview mode (admin UX) — shows what unpaid users see.
+  // Safe to expose publicly; it doesn’t change data, it just renders the inert page for this request.
+  const paywallPreview =
+    String(req.query?.paywallPreview || '').trim() === '1' ||
+    String(req.query?.paywallPreview || '').trim().toLowerCase() === 'true';
 
-      // If we can’t find the owner user record, treat it as inactive (safer)
-      if (!ownerUser || !isUserPaid(ownerUser)) {
-        return sendInertPublicResponse(req, res, slug);
-      }
-    }
+  if (paywallPreview) {
+    return sendInertPublicResponse(req, res, slug);
+  }
+
+  const ownerUser = await findUserByEmail(space.ownerEmail);
+
+  // If we can’t find the owner user record, treat it as inactive (safer)
+  if (!ownerUser || !isUserPaid(ownerUser)) {
+    return sendInertPublicResponse(req, res, slug);
+  }
+}
 
     // Never serve internal history, even if it exists on disk
     const reqRel = normalizeRelPosix(req.path || '');
@@ -4409,7 +4646,945 @@ app.get('/api/admin/users', requireAdmin, async (req, res, next) => {
   }
 });
 
-// Auth status (lightweight)
+
+// ───────────────── Admin Billing / Entitlements ─────────────────
+
+function safeIsoOrNull(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  const ms = Date.parse(s);
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms).toISOString();
+}
+
+function daysBetween(nowMs, futureMs) {
+  const d = (futureMs - nowMs) / (24 * 60 * 60 * 1000);
+  return Math.ceil(d);
+}
+
+function computeEntitlement(user) {
+  const u = withUserDefaults(user);
+  const now = Date.now();
+
+  const paidUntilMs = u.billing?.paidUntil ? Date.parse(u.billing.paidUntil) : NaN;
+  const hasValidPaidUntil = Number.isFinite(paidUntilMs);
+
+  const isComped = !!u.billing?.comped;
+  const isActive = String(u.status || 'active').toLowerCase() === 'active';
+
+  const isPaid = isActive && (isComped || (hasValidPaidUntil && paidUntilMs > now));
+  const daysLeft = hasValidPaidUntil ? daysBetween(now, paidUntilMs) : null;
+
+  const expiringSoon =
+    isActive &&
+    !isComped &&
+    hasValidPaidUntil &&
+    paidUntilMs > now &&
+    daysLeft != null &&
+    daysLeft <= 7;
+
+  const expired =
+    isActive &&
+    !isComped &&
+    hasValidPaidUntil &&
+    paidUntilMs <= now;
+
+  return {
+    isActive,
+    isComped,
+    isPaid,
+    paidUntil: u.billing?.paidUntil || null,
+    daysLeft,
+    expiringSoon,
+    expired,
+    tier: u.billing?.tier || null,
+    notes: u.billing?.notes || null,
+  };
+}
+
+// GET /api/admin/billing/overview
+// Returns users + entitlement classification + their spaces + preview URLs
+app.get('/api/admin/billing/overview', requireUser, requireAdminUser, async (req, res, next) => {
+  try {
+    const users = await loadUsersMeta();
+    const spaces = await loadSpacesMeta();
+
+    const publicBase = String(PUBLIC_IFRAME_BASE_URL || '').replace(/\/+$/, '');
+    const appBase = String(APP_BASE_URL || '').replace(/\/+$/, '');
+
+    const byUserIdSpaces = new Map();
+    for (const s of (spaces || [])) {
+      if (!s || s.status !== 'active') continue;
+      const ownerId = s.ownerUserId || null;
+      if (!ownerId) continue;
+      if (!byUserIdSpaces.has(ownerId)) byUserIdSpaces.set(ownerId, []);
+      byUserIdSpaces.get(ownerId).push(s);
+    }
+
+    const outUsers = (users || []).filter(Boolean).map((u) => {
+      const ent = computeEntitlement(u);
+      const mySpaces = byUserIdSpaces.get(u.id) || [];
+
+      const spacesOut = mySpaces.map((s) => {
+        const iframeUrl = publicBase
+          ? `${publicBase}/p/${encodeURIComponent(s.slug)}/index.html`
+          : `/p/${encodeURIComponent(s.slug)}/index.html`;
+
+        const paywallPreviewUrl = iframeUrl.includes('?')
+          ? `${iframeUrl}&paywallPreview=1`
+          : `${iframeUrl}?paywallPreview=1`;
+
+        return {
+          slug: s.slug,
+          quotaMb: s.quotaMb ?? null,
+          iframeUrl,
+          paywallPreviewUrl,
+        };
+      });
+
+      return {
+        id: u.id,
+        status: u.status || 'active',
+        lastLoginAt: u.lastLoginAt || null,
+
+        discordId: u.discordId || null,
+        discordUsername: u.discordUsername || null,
+        discordGlobalName: u.discordGlobalName || null,
+        discordAvatarUrl: u.discordAvatarUrl || null,
+
+        email: u.email || null,
+        pendingEmail: u.pendingEmail || null,
+        emailVerifiedAt: u.emailVerifiedAt || null,
+
+        billing: {
+          comped: !!u.billing?.comped,
+          paidUntil: u.billing?.paidUntil || null,
+          tier: u.billing?.tier || null,
+          notes: u.billing?.notes || null,
+        },
+
+        entitlement: ent,
+        spaces: spacesOut,
+
+        // convenience links
+        adminAppUrl: appBase ? `${appBase}/admin` : '/admin',
+      };
+    });
+
+    // Useful server-side buckets
+    const comped = outUsers.filter((u) => u.entitlement.isComped && u.entitlement.isActive);
+    const paid = outUsers.filter((u) => !u.entitlement.isComped && u.entitlement.isPaid);
+    const unpaid = outUsers.filter((u) => !u.entitlement.isPaid && u.entitlement.isActive);
+    const expiringSoon = outUsers.filter((u) => u.entitlement.expiringSoon);
+    const inactive = outUsers.filter((u) => !u.entitlement.isActive);
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({
+      ok: true,
+      counts: {
+        total: outUsers.length,
+        comped: comped.length,
+        paid: paid.length,
+        unpaid: unpaid.length,
+        expiringSoon: expiringSoon.length,
+        inactive: inactive.length,
+      },
+      users: outUsers,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/admin/users/:id/billing', requireUser, requireAdminUser, requireEditorOrigin, async (req, res, next) => {
+  try {
+    const userId = String(req.params.id || '').trim();
+    if (!userId) return res.status(400).json({ error: 'bad_user_id' });
+
+    const users = await loadUsersMeta();
+    const idx = users.findIndex((u) => u && u.id === userId);
+    if (idx === -1) return res.status(404).json({ error: 'user_not_found' });
+
+    const nowIso = new Date().toISOString();
+    const u = users[idx];
+    const before = withUserDefaults(u);
+
+    const patch = req.body && typeof req.body === 'object' ? req.body : {};
+    const nextBilling = { ...(u.billing || {}) };
+
+    if ('comped' in patch) nextBilling.comped = Boolean(patch.comped);
+
+    if ('paidUntil' in patch) {
+      const v = patch.paidUntil == null ? null : String(patch.paidUntil).trim();
+      nextBilling.paidUntil = v || null;
+    }
+
+    if ('tier' in patch) {
+      const v = patch.tier == null ? null : String(patch.tier).trim();
+      nextBilling.tier = v || null;
+    }
+
+    if ('notes' in patch) {
+      const v = patch.notes == null ? null : String(patch.notes);
+      nextBilling.notes = v || null;
+    }
+
+    let nextStatus = u.status || 'active';
+    if ('status' in patch) {
+      const s = String(patch.status || '').trim().toLowerCase();
+      if (s !== 'active' && s !== 'inactive') {
+        return res.status(400).json({ error: 'bad_status', message: 'status must be active or inactive' });
+      }
+      nextStatus = s;
+    }
+
+    users[idx] = {
+      ...u,
+      billing: nextBilling,
+      status: nextStatus,
+      updatedAt: nowIso,
+    };
+
+    await saveUsersMeta(users);
+
+    const after = withUserDefaults(users[idx]);
+
+    // ✅ AUDIT (store before/after billing + status only)
+    await appendAdminAudit(req, {
+      action: 'user_billing_updated',
+      target: { type: 'user', id: userId, email: after.email || after.pendingEmail || null },
+      detail: {
+        before: { status: before.status || 'active', billing: before.billing || {} },
+        after: { status: after.status || 'active', billing: after.billing || {} },
+      },
+    });
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({
+      ok: true,
+      user: {
+        id: users[idx].id,
+        status: users[idx].status || 'active',
+        billing: {
+          comped: !!users[idx].billing?.comped,
+          paidUntil: users[idx].billing?.paidUntil || null,
+          tier: users[idx].billing?.tier || null,
+          notes: users[idx].billing?.notes || null,
+        },
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/admin/users/:id/billing/extend', requireUser, requireAdminUser, requireEditorOrigin, async (req, res, next) => {
+  try {
+    const userId = String(req.params.id || '').trim();
+    if (!userId) return res.status(400).json({ error: 'bad_user_id' });
+
+    const daysRaw = Number(req.body?.days ?? 30);
+    const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, Math.floor(daysRaw))) : 30;
+
+    const users = await loadUsersMeta();
+    const idx = users.findIndex((u) => u && u.id === userId);
+    if (idx === -1) return res.status(404).json({ error: 'user_not_found' });
+
+    const nowIso = new Date().toISOString();
+    const u = users[idx];
+    const beforePaidUntil = u.billing?.paidUntil || null;
+
+    const billing = { ...(u.billing || {}) };
+
+    // If comped, extending is a no-op (log as such)
+    if (billing.comped) {
+      await appendAdminAudit(req, {
+        action: 'user_billing_extend_noop_comped',
+        target: { type: 'user', id: userId, email: u.email || u.pendingEmail || null },
+        detail: { days },
+      });
+
+      return res.json({ ok: true, unchanged: true, userId });
+    }
+
+    const nowMs = Date.now();
+    const curMs = billing.paidUntil ? Date.parse(billing.paidUntil) : NaN;
+    const baseMs = Number.isFinite(curMs) && curMs > nowMs ? curMs : nowMs;
+    const nextMs = baseMs + days * 24 * 60 * 60 * 1000;
+    billing.paidUntil = new Date(nextMs).toISOString();
+
+    users[idx] = {
+      ...u,
+      billing,
+      updatedAt: nowIso,
+      status: u.status || 'active',
+    };
+
+    await saveUsersMeta(users);
+
+    await appendAdminAudit(req, {
+      action: 'user_billing_extended',
+      target: { type: 'user', id: userId, email: users[idx].email || users[idx].pendingEmail || null },
+      detail: { days, beforePaidUntil, afterPaidUntil: users[idx].billing?.paidUntil || null },
+    });
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({
+      ok: true,
+      user: {
+        id: users[idx].id,
+        billing: {
+          comped: !!users[idx].billing?.comped,
+          paidUntil: users[idx].billing?.paidUntil || null,
+          tier: users[idx].billing?.tier || null,
+          notes: users[idx].billing?.notes || null,
+        },
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+
+// ───────────────── Admin Audit Log (append-only) ─────────────────
+
+// Store audit log next to your other meta files by default.
+// You can override via ADMIN_AUDIT_META_PATH env var.
+const ADMIN_AUDIT_META_PATH =
+  process.env.ADMIN_AUDIT_META_PATH ||
+  path.join(path.dirname(USERS_META_PATH), 'adminAudit.meta.json');
+
+const ADMIN_AUDIT_MAX = (() => {
+  const n = Number(process.env.ADMIN_AUDIT_MAX || 5000);
+  return Number.isFinite(n) ? Math.max(500, Math.min(50_000, n)) : 5000;
+})();
+
+async function loadAdminAuditLog() {
+  return readJsonArray(ADMIN_AUDIT_META_PATH);
+}
+
+async function saveAdminAuditLog(arr) {
+  return writeJsonArray(ADMIN_AUDIT_META_PATH, arr);
+}
+
+function auditActorFromReq(req) {
+  const u = req.user || {};
+  return {
+    userId: u.id || null,
+    discordId: u.discordId || null,
+    discordUsername: u.discordUsername || null,
+    discordGlobalName: u.discordGlobalName || null,
+    email: u.email || u.pendingEmail || null,
+    ip: req.ip || null,
+    userAgent: req.get('user-agent') || null,
+  };
+}
+
+// Append-only. Trims to ADMIN_AUDIT_MAX newest entries.
+async function appendAdminAudit(req, entry) {
+  const nowIso = new Date().toISOString();
+
+  const base = {
+    id: generateId('aa_'),
+    at: nowIso,
+    action: safeStr(entry?.action || 'unknown', 120),
+    actor: auditActorFromReq(req),
+    target: entry?.target || null, // {type,id,slug,email,...}
+    meta: {
+      method: req.method,
+      path: req.originalUrl,
+    },
+    detail: entry?.detail || null, // any JSON-safe data
+  };
+
+  let arr = [];
+  try {
+    arr = await loadAdminAuditLog();
+  } catch (err) {
+    // If missing/corrupt, start fresh (don’t block admin actions)
+    console.warn('[audit] failed to load audit log; starting new', err.message);
+    arr = [];
+  }
+
+  arr.push(base);
+
+  // Trim (keep newest)
+  if (arr.length > ADMIN_AUDIT_MAX) {
+    arr = arr.slice(arr.length - ADMIN_AUDIT_MAX);
+  }
+
+  try {
+    await saveAdminAuditLog(arr);
+  } catch (err) {
+    console.error('[audit] failed to append audit log (non-fatal)', err);
+  }
+}
+
+// GET /api/admin/audit?limit=200&q=...&action=...&actor=...
+// Returns newest-first
+app.get('/api/admin/audit', requireUser, requireAdminUser, async (req, res, next) => {
+  try {
+    const limitRaw = Number(req.query?.limit || 200);
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(2000, limitRaw)) : 200;
+
+    const q = String(req.query?.q || '').trim().toLowerCase();
+    const action = String(req.query?.action || '').trim().toLowerCase();
+    const actor = String(req.query?.actor || '').trim().toLowerCase();
+
+    const arr = await loadAdminAuditLog();
+    const list = Array.isArray(arr) ? arr.filter(Boolean) : [];
+
+    const haystack = (e) => {
+      const a = e?.actor || {};
+      const t = e?.target || {};
+      return [
+        e?.id,
+        e?.action,
+        e?.at,
+        a.userId,
+        a.discordId,
+        a.discordUsername,
+        a.discordGlobalName,
+        a.email,
+        t.type,
+        t.id,
+        t.slug,
+        t.email,
+        t.userId,
+        JSON.stringify(e?.detail || {}),
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+    };
+
+    let out = list;
+
+    if (action) out = out.filter((e) => String(e?.action || '').toLowerCase() === action);
+
+    if (actor) {
+      out = out.filter((e) => {
+        const a = e?.actor || {};
+        return (
+          String(a.userId || '').toLowerCase().includes(actor) ||
+          String(a.discordId || '').toLowerCase().includes(actor) ||
+          String(a.discordUsername || '').toLowerCase().includes(actor) ||
+          String(a.discordGlobalName || '').toLowerCase().includes(actor) ||
+          String(a.email || '').toLowerCase().includes(actor)
+        );
+      });
+    }
+
+    if (q) out = out.filter((e) => haystack(e).includes(q));
+
+    // newest first
+    out.sort((a, b) => (Date.parse(b?.at || '') || 0) - (Date.parse(a?.at || '') || 0));
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok: true, total: out.length, entries: out.slice(0, limit) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ───────────────── Admin Activity Feed ─────────────────
+// GET /api/admin/activity?limit=200
+// Merges: audit log + recent sessions + workspace requests + spaces created
+app.get('/api/admin/activity', requireUser, requireAdminUser, async (req, res, next) => {
+  try {
+    const limitRaw = Number(req.query?.limit || 200);
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(2000, limitRaw)) : 200;
+
+    const toMs = (iso) => {
+      const ms = Date.parse(String(iso || ''));
+      return Number.isFinite(ms) ? ms : 0;
+    };
+
+    const [audit, sessions, requests, spaces] = await Promise.all([
+      loadAdminAuditLog().catch(() => []),
+      loadSessionsMeta().catch(() => []),
+      loadWorkspaceRequests().catch(() => []),
+      loadSpacesMeta().catch(() => []),
+    ]);
+
+    const items = [];
+
+    // Audit entries → activity items
+    for (const e of (Array.isArray(audit) ? audit : [])) {
+      if (!e) continue;
+      items.push({
+        kind: 'audit',
+        at: e.at || null,
+        atMs: toMs(e.at),
+        action: e.action || 'unknown',
+        actor: e.actor || null,
+        target: e.target || null,
+        detail: e.detail || null,
+        id: e.id || null,
+      });
+    }
+
+    // Sessions → logins (recent sign-ins)
+    for (const s of (Array.isArray(sessions) ? sessions : [])) {
+      if (!s) continue;
+      items.push({
+        kind: 'login',
+        at: s.createdAt || null,
+        atMs: toMs(s.createdAt),
+        action: 'login',
+        actor: null,
+        target: { type: 'session', id: s.id, userId: s.userId || null, email: s.email || null },
+        detail: {
+          userId: s.userId || null,
+          email: s.email || null,
+          ip: s.ip || null,
+          userAgent: s.userAgent || null,
+        },
+        id: s.id || null,
+      });
+    }
+
+    // Workspace requests
+    for (const r of (Array.isArray(requests) ? requests : [])) {
+      if (!r) continue;
+      items.push({
+        kind: 'workspace_request',
+        at: r.createdAt || null,
+        atMs: toMs(r.createdAt),
+        action: `workspace_request_${String(r.status || 'unknown').toLowerCase()}`,
+        actor: null,
+        target: { type: 'workspace_request', id: r.id || null, userId: r.userId || null, email: r.email || null, slug: r.suggestedSlug || null },
+        detail: {
+          status: r.status || null,
+          note: r.note || null,
+          suggestedSlug: r.suggestedSlug || null,
+        },
+        id: r.id || null,
+      });
+    }
+
+    // Spaces created (from spaces meta)
+    for (const sp of (Array.isArray(spaces) ? spaces : [])) {
+      if (!sp) continue;
+      items.push({
+        kind: 'space',
+        at: sp.createdAt || null,
+        atMs: toMs(sp.createdAt),
+        action: 'space_created',
+        actor: null,
+        target: { type: 'space', slug: sp.slug || null, userId: sp.ownerUserId || null, email: sp.ownerEmail || null },
+        detail: {
+          quotaMb: sp.quotaMb ?? null,
+          status: sp.status || null,
+        },
+        id: sp.slug || null,
+      });
+    }
+
+    // Sort newest-first
+    items.sort((a, b) => (b.atMs || 0) - (a.atMs || 0));
+
+    // Return trimmed
+    const out = items.slice(0, limit).map((x) => {
+      const { atMs, ...rest } = x;
+      return rest;
+    });
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok: true, total: items.length, items: out });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/admin/users/:id/sessions?limit=50
+app.get('/api/admin/users/:id/sessions', requireUser, requireAdminUser, async (req, res, next) => {
+  try {
+    const userId = String(req.params.id || '').trim();
+    if (!userId) return res.status(400).json({ error: 'bad_user_id' });
+
+    const limitRaw = Number(req.query?.limit || 50);
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(500, limitRaw)) : 50;
+
+    const sessions = await loadSessionsMeta();
+    const list = (Array.isArray(sessions) ? sessions : [])
+      .filter((s) => s && String(s.userId || '') === userId)
+      .sort((a, b) => (Date.parse(b.createdAt || '') || 0) - (Date.parse(a.createdAt || '') || 0))
+      .slice(0, limit)
+      .map((s) => ({
+        id: s.id,
+        createdAt: s.createdAt || null,
+        email: s.email || null,
+        ip: s.ip || null,
+        userAgent: s.userAgent || null,
+      }));
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok: true, userId, sessions: list });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/admin/users/:id/sessions/revoke
+// body: { sid?: string }  -> if sid present: revoke that session only; else revoke all for user
+app.post('/api/admin/users/:id/sessions/revoke', requireUser, requireAdminUser, requireEditorOrigin, async (req, res, next) => {
+  try {
+    const userId = String(req.params.id || '').trim();
+    if (!userId) return res.status(400).json({ error: 'bad_user_id' });
+
+    const sid = req.body?.sid != null ? String(req.body.sid).trim() : '';
+
+    const sessions = await loadSessionsMeta();
+    const beforeCount = Array.isArray(sessions) ? sessions.length : 0;
+
+    let nextSessions = Array.isArray(sessions) ? sessions : [];
+    let revokedCount = 0;
+
+    if (sid) {
+      const had = nextSessions.some((s) => s && s.id === sid && String(s.userId || '') === userId);
+      nextSessions = nextSessions.filter((s) => !(s && s.id === sid && String(s.userId || '') === userId));
+      revokedCount = had ? 1 : 0;
+
+      await appendAdminAudit(req, {
+        action: 'session_revoked_one',
+        target: { type: 'user', id: userId },
+        detail: { sid, revoked: revokedCount === 1 },
+      });
+    } else {
+      const beforeUser = nextSessions.filter((s) => s && String(s.userId || '') === userId).length;
+      nextSessions = nextSessions.filter((s) => !(s && String(s.userId || '') === userId));
+      revokedCount = beforeUser;
+
+      await appendAdminAudit(req, {
+        action: 'session_revoked_all',
+        target: { type: 'user', id: userId },
+        detail: { revokedCount },
+      });
+    }
+
+    if (nextSessions.length !== beforeCount) {
+      await saveSessionsMeta(nextSessions);
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok: true, userId, revokedCount });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ───────────────── Admin: user detail (for drawer) ─────────────────
+// GET /api/admin/users/:id/detail
+app.get('/api/admin/users/:id/detail', requireUser, requireAdminUser, async (req, res, next) => {
+  try {
+    const userId = String(req.params.id || '').trim();
+    if (!userId) return res.status(400).json({ error: 'bad_user_id' });
+
+    const users = await loadUsersMeta();
+    const u0 = (Array.isArray(users) ? users : []).find((u) => u && u.id === userId) || null;
+    if (!u0) return res.status(404).json({ error: 'user_not_found' });
+
+    // Compute entitlement inline (self-contained)
+    const u = withUserDefaults(u0);
+    const now = Date.now();
+    const status = String(u.status || 'active').toLowerCase();
+
+    const paidUntilMs = u.billing?.paidUntil ? Date.parse(u.billing.paidUntil) : NaN;
+    const hasValidPaidUntil = Number.isFinite(paidUntilMs);
+
+    const isActive = status === 'active';
+    const isComped = !!u.billing?.comped;
+    const isPaid = isActive && (isComped || (hasValidPaidUntil && paidUntilMs > now));
+
+    const daysLeft = hasValidPaidUntil ? Math.ceil((paidUntilMs - now) / (24 * 60 * 60 * 1000)) : null;
+    const expiringSoon = isActive && !isComped && hasValidPaidUntil && paidUntilMs > now && daysLeft != null && daysLeft <= 7;
+
+    const spaces = await loadSpacesMeta();
+    const mySpaces = (Array.isArray(spaces) ? spaces : [])
+      .filter((s) => s && s.status === 'active' && String(s.ownerUserId || '') === userId);
+
+    const publicBase = String(PUBLIC_IFRAME_BASE_URL || '').replace(/\/+$/, '');
+    const spacesOut = mySpaces.map((s) => {
+      const iframeUrl = publicBase
+        ? `${publicBase}/p/${encodeURIComponent(s.slug)}/index.html`
+        : `/p/${encodeURIComponent(s.slug)}/index.html`;
+
+      const paywallPreviewUrl = iframeUrl.includes('?')
+        ? `${iframeUrl}&paywallPreview=1`
+        : `${iframeUrl}?paywallPreview=1`;
+
+      return {
+        slug: s.slug,
+        quotaMb: s.quotaMb ?? null,
+        iframeUrl,
+        paywallPreviewUrl,
+      };
+    });
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({
+      ok: true,
+      user: {
+        id: u.id,
+        status: u.status || 'active',
+        lastLoginAt: u.lastLoginAt || null,
+
+        discordId: u.discordId || null,
+        discordUsername: u.discordUsername || null,
+        discordGlobalName: u.discordGlobalName || null,
+        discordAvatarUrl: u.discordAvatarUrl || null,
+
+        email: u.email || null,
+        pendingEmail: u.pendingEmail || null,
+        emailVerifiedAt: u.emailVerifiedAt || null,
+
+        billing: {
+          comped: !!u.billing?.comped,
+          paidUntil: u.billing?.paidUntil || null,
+          tier: u.billing?.tier || null,
+          notes: u.billing?.notes || null,
+        },
+
+        entitlement: {
+          isActive,
+          isComped,
+          isPaid,
+          paidUntil: u.billing?.paidUntil || null,
+          daysLeft,
+          expiringSoon,
+          tier: u.billing?.tier || null,
+          notes: u.billing?.notes || null,
+        },
+
+        spaces: spacesOut,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ───────────────── Admin: System Doctor ─────────────────
+// GET /api/admin/doctor
+app.get('/api/admin/doctor', requireUser, requireAdminUser, async (req, res, next) => {
+  try {
+    const nowIso = new Date().toISOString();
+
+    // Helper checks
+    const canAccess = async (p) => {
+      if (!p) return { ok: false, path: p || null, exists: false, readable: false, writable: false, error: 'missing_path' };
+      try {
+        await fs.access(p, fsSync.constants.F_OK);
+      } catch {
+        return { ok: false, path: p, exists: false, readable: false, writable: false, error: 'missing' };
+      }
+
+      let readable = false;
+      let writable = false;
+
+      try { await fs.access(p, fsSync.constants.R_OK); readable = true; } catch {}
+      try { await fs.access(p, fsSync.constants.W_OK); writable = true; } catch {}
+
+      return {
+        ok: readable && writable,
+        path: p,
+        exists: true,
+        readable,
+        writable,
+        error: readable && writable ? null : 'permission',
+      };
+    };
+
+    const statfs = async (p) => {
+      // Node 18+ has fs.promises.statfs on linux; if missing, skip gracefully
+      const statfsFn = fs.statfs ? fs.statfs : null;
+      if (!statfsFn) return { ok: false, supported: false };
+
+      try {
+        const s = await statfsFn(p);
+        // bytes
+        const block = Number(s.bsize || 0);
+        const free = Number(s.bfree || 0);
+        const avail = Number(s.bavail || 0);
+        const total = Number(s.blocks || 0);
+
+        const totalBytes = block * total;
+        const freeBytes = block * free;
+        const availBytes = block * avail;
+
+        return { ok: true, supported: true, totalBytes, freeBytes, availBytes };
+      } catch (err) {
+        return { ok: false, supported: true, error: err.message || 'statfs_failed' };
+      }
+    };
+
+    const fmtMb = (bytes) => {
+      const n = Number(bytes);
+      if (!Number.isFinite(n) || n < 0) return null;
+      return +(n / (1024 * 1024)).toFixed(2);
+    };
+
+    // Meta store health
+    const metaChecks = await Promise.all([
+      canAccess(USERS_META_PATH),
+      canAccess(SPACES_META_PATH),
+      canAccess(WORKSPACE_REQUESTS_PATH),
+      canAccess(SESSIONS_META_PATH),
+      canAccess(TOKENS_META_PATH),
+      canAccess(FILES_META_PATH),
+      canAccess(FILE_VERSIONS_META_PATH),
+      canAccess(EMAIL_VERIFY_TOKENS_META_PATH),
+    ]);
+
+    const meta = {
+      users: metaChecks[0],
+      spaces: metaChecks[1],
+      workspaceRequests: metaChecks[2],
+      sessions: metaChecks[3],
+      tokens: metaChecks[4],
+      filesMeta: metaChecks[5],
+      fileVersionsMeta: metaChecks[6],
+      emailVerifyTokens: metaChecks[7],
+    };
+
+    // Root checks
+    const spacesRootCheck = await (async () => {
+      try {
+        await fs.mkdir(SPACES_ROOT, { recursive: true });
+        const s = await statfs(SPACES_ROOT);
+        return { ok: true, path: SPACES_ROOT, statfs: s };
+      } catch (err) {
+        return { ok: false, path: SPACES_ROOT, error: err.message || 'spaces_root_failed' };
+      }
+    })();
+
+    // Config / host gating snapshot
+    const appBase = String(APP_BASE_URL || '').replace(/\/+$/, '');
+    const publicBase = String(PUBLIC_IFRAME_BASE_URL || '').replace(/\/+$/, '');
+
+    const config = {
+      env: NODE_ENV,
+      isProd: !!IS_PROD,
+      trustProxy: !!TRUST_PROXY,
+      appBaseUrl: appBase || null,
+      publicIframeBaseUrl: publicBase || null,
+      appHostname: APP_HOSTNAME || null,
+      publicIframeHostname: PUBLIC_IFRAME_HOSTNAME || null,
+      frameAncestors: PORTALS_FRAME_ANCESTORS || null,
+    };
+
+    // Service config sanity
+    const services = {
+      sendgrid: {
+        configured: !!(SENDGRID_API_KEY && SENDGRID_FROM),
+        from: SENDGRID_FROM || null,
+        adminEmail: WORKSPACE_ADMIN_EMAIL || null,
+      },
+      openai: {
+        configured: !!OPENAI_API_KEY,
+        defaultModel: DEFAULT_GPT_MODEL || null,
+        allowedModels: Array.isArray(ALLOWED_GPT_MODELS) ? ALLOWED_GPT_MODELS : [],
+        rate: {
+          windowMs: GPT_RATE_WINDOW_MS,
+          maxPerWindow: GPT_RATE_MAX_PER_WINDOW,
+          dailyLimit: GPT_MAX_CALLS_PER_DAY,
+        },
+      },
+      discord: {
+        configured: !!(DISCORD_CLIENT_ID && DISCORD_CLIENT_SECRET && DISCORD_REDIRECT_URI),
+        guildConfigured: !!(DISCORD_BOT_TOKEN && DISCORD_GUILD_ID),
+        requiredRoleIds: Array.isArray(DISCORD_REQUIRED_ROLE_IDS) ? DISCORD_REQUIRED_ROLE_IDS : [],
+        redirectUri: DISCORD_REDIRECT_URI || null,
+      },
+    };
+
+    // Storage: largest spaces (best-effort, bounded)
+    let largestSpaces = [];
+    try {
+      const spaces = await loadSpacesMeta();
+      const active = (Array.isArray(spaces) ? spaces : []).filter((s) => s && s.status === 'active');
+
+      // sample cap to avoid heavy scans
+      const cap = Math.min(active.length, 30);
+
+      // naive “pick first cap”; if you store currentSizeBytes it’ll still be useful
+      const subset = active.slice(0, cap);
+
+      // Compute sizes with limited concurrency
+      const concurrency = 4;
+      const queue = [...subset];
+      const results = [];
+
+      const worker = async () => {
+        while (queue.length) {
+          const s = queue.shift();
+          if (!s?.dirPath) continue;
+
+          let usedBytes = null;
+          try {
+            usedBytes = await getDirSizeBytes(s.dirPath);
+          } catch (err) {
+            usedBytes = null;
+          }
+
+          results.push({
+            slug: s.slug,
+            quotaMb: s.quotaMb ?? null,
+            usedMb: usedBytes != null ? fmtMb(usedBytes) : null,
+            usedBytes,
+            ownerUserId: s.ownerUserId || null,
+            ownerEmail: s.ownerEmail || null,
+          });
+        }
+      };
+
+      await Promise.all(Array.from({ length: concurrency }, worker));
+
+      results.sort((a, b) => (b.usedBytes || 0) - (a.usedBytes || 0));
+      largestSpaces = results.slice(0, 10);
+    } catch {
+      largestSpaces = [];
+    }
+
+    const checks = [
+      { key: 'spaces_root', label: 'Spaces root accessible', ok: !!spacesRootCheck.ok },
+      { key: 'meta_users', label: 'Users meta readable+writable', ok: !!meta.users.ok },
+      { key: 'meta_spaces', label: 'Spaces meta readable+writable', ok: !!meta.spaces.ok },
+      { key: 'meta_sessions', label: 'Sessions meta readable+writable', ok: !!meta.sessions.ok },
+      { key: 'sendgrid', label: 'SendGrid configured', ok: !!services.sendgrid.configured },
+      { key: 'discord_oauth', label: 'Discord OAuth configured', ok: !!services.discord.configured },
+      { key: 'discord_guild', label: 'Discord guild check configured', ok: !!services.discord.guildConfigured },
+      { key: 'openai', label: 'OpenAI configured', ok: !!services.openai.configured },
+    ];
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({
+      ok: true,
+      at: nowIso,
+      config,
+      services,
+      meta,
+      storage: {
+        spacesRoot: spacesRootCheck,
+        largestSpaces,
+      },
+      checks,
+      request: {
+        host: req.get('host') || null,
+        origin: req.get('origin') || null,
+        ip: req.ip || null,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+
+// ───────────────── auth status (lightweight) ─────────────────
 // GET /api/auth/status
 // Returns whether the current request has a valid session, plus a tiny user snapshot.
 app.get('/api/auth/status', async (req, res, next) => {

@@ -1,8 +1,5 @@
 // client/src/api.js
 
-// In dev, set VITE_API_BASE=http://localhost:4100
-// In prod, you can leave it blank IF your app origin proxies /api to the Node server.
-// Otherwise set VITE_API_BASE to your API origin in prod too.
 const API_BASE =
   String(import.meta?.env?.VITE_API_BASE || '').replace(/\/+$/, '') ||
   window.location.origin;
@@ -21,8 +18,6 @@ async function request(path, options = {}) {
   const isFormData =
     typeof FormData !== 'undefined' && rest.body instanceof FormData;
 
-  // Only set JSON content-type when we actually send a JSON body.
-  // (Setting Content-Type on GET triggers preflight + CORS headaches.)
   const hasContentTypeHeader =
     Object.keys(headers).some((k) => k.toLowerCase() === 'content-type');
 
@@ -39,7 +34,6 @@ async function request(path, options = {}) {
 
   const text = await res.text();
 
-  // Parse best-effort
   let data;
   try {
     data = text ? JSON.parse(text) : null;
@@ -69,12 +63,10 @@ export function getMe() {
   return request('/api/me');
 }
 
-// Lightweight auth status for /login UX
 export function getAuthStatus() {
   return request('/api/auth/status');
 }
 
-// Discord OAuth login (redirect-based)
 export function startDiscordLogin() {
   window.location.href = `${API_BASE}/api/auth/discord/start`;
 }
@@ -84,10 +76,6 @@ export function logout() {
 }
 
 /** ───────────────── Spaces/files ───────────────── */
-
-export function getSpacesForUser() {
-  return getMe();
-}
 
 export function getSpaceFiles(slug, path = '.') {
   const params = new URLSearchParams({ path });
@@ -125,7 +113,6 @@ export function getSpaceFileHistory(slug, { path, fileId, limit = 200 } = {}) {
   if (path) params.set('path', path);
   if (fileId) params.set('fileId', fileId);
   if (limit != null) params.set('limit', String(limit));
-
   return request(`/api/spaces/${encodeURIComponent(slug)}/file/history?${params.toString()}`);
 }
 
@@ -137,10 +124,7 @@ export function getSpaceFileVersion(slug, versionId) {
 export function restoreSpaceFileVersion(slug, versionId, toPath = null) {
   return request(`/api/spaces/${encodeURIComponent(slug)}/file/restore`, {
     method: 'POST',
-    body: JSON.stringify({
-      versionId,
-      ...(toPath ? { toPath } : {}),
-    }),
+    body: JSON.stringify({ versionId, ...(toPath ? { toPath } : {}) }),
   });
 }
 
@@ -150,10 +134,7 @@ export function getSpaceUsage(slug) {
 
 /** ───────────────── GPT ───────────────── */
 
-export function callSpaceGpt(
-  slug,
-  { prompt, filePath, fileContent, model = 'gpt-4.1-mini', messages = [] }
-) {
+export function callSpaceGpt(slug, { prompt, filePath, fileContent, model = 'gpt-4.1-mini', messages = [] }) {
   return request(`/api/spaces/${encodeURIComponent(slug)}/gpt/chat`, {
     method: 'POST',
     body: JSON.stringify({ prompt, filePath, fileContent, model, messages }),
@@ -168,19 +149,11 @@ export async function uploadSpaceAssets(slug, files, subdir = 'assets') {
   formData.append('subdir', subdir);
 
   const url = `${API_BASE}/api/spaces/${encodeURIComponent(slug)}/upload`;
-  const res = await fetch(url, {
-    method: 'POST',
-    body: formData,
-    credentials: 'include',
-  });
+  const res = await fetch(url, { method: 'POST', body: formData, credentials: 'include' });
 
   const text = await res.text();
   let data;
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = text;
-  }
+  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
 
   if (!res.ok) {
     const msg =
@@ -213,16 +186,17 @@ export function requestWorkspace(note, suggestedSlug, email = null) {
     ...(suggestedSlug != null ? { suggestedSlug } : {}),
     ...(email ? { email } : {}),
   };
-
-  return request('/api/spaces/request', {
-    method: 'POST',
-    body: JSON.stringify(body),
-  });
+  return request('/api/spaces/request', { method: 'POST', body: JSON.stringify(body) });
 }
 
-export function needsEmailForWorkspaceRequest(meResponse) {
-  const email = meResponse?.user?.email || '';
-  return !String(email).trim();
+/** ───────────────── Email verification ───────────────── */
+
+export function startEmailVerification(email) {
+  return request('/api/user/email/start', { method: 'POST', body: JSON.stringify({ email }) });
+}
+
+export function resendEmailVerification() {
+  return request('/api/user/email/resend', { method: 'POST' });
 }
 
 /** ───────────────── Admin ───────────────── */
@@ -247,22 +221,14 @@ export function adminRejectSpaceRequest(id, reason) {
   });
 }
 
-// Email verification (post-OAuth onboarding)
-export function startEmailVerification(email) {
-  return request('/api/user/email/start', {
-    method: 'POST',
-    body: JSON.stringify({ email }),
-  });
+export function adminSearchUsers(q, limit = 25) {
+  const params = new URLSearchParams();
+  if (q != null) params.set('q', String(q));
+  params.set('limit', String(limit));
+  return request(`/api/admin/users/search?${params.toString()}`, { method: 'GET' });
 }
 
-export function resendEmailVerification() {
-  return request('/api/user/email/resend', {
-    method: 'POST',
-  });
-}
-
-// Create a space (supports ownerUserId)
-export function adminCreateSpace({ slug, quotaMb = 50, ownerEmail = null, ownerUserId = null } = {}) {
+export function adminCreateSpace({ slug, quotaMb = 100, ownerEmail = null, ownerUserId = null } = {}) {
   return request('/api/admin/spaces', {
     method: 'POST',
     body: JSON.stringify({
@@ -274,15 +240,6 @@ export function adminCreateSpace({ slug, quotaMb = 50, ownerEmail = null, ownerU
   });
 }
 
-// Search users for pickers
-export function adminSearchUsers(q, limit = 25) {
-  const params = new URLSearchParams();
-  if (q != null) params.set('q', String(q));
-  params.set('limit', String(limit));
-  return request(`/api/admin/users/search?${params.toString()}`, { method: 'GET' });
-}
-
-// Send email to userId
 export function adminSendUserEmail(userId, { subject, text = '', html = '', from = null } = {}) {
   return request(`/api/admin/users/${encodeURIComponent(userId)}/email`, {
     method: 'POST',
@@ -292,5 +249,94 @@ export function adminSendUserEmail(userId, { subject, text = '', html = '', from
       ...(html ? { html } : {}),
       ...(from ? { from } : {}),
     }),
+  });
+}
+
+// Billing endpoints (if you’re using the billing console)
+export function adminBillingOverview() {
+  return request('/api/admin/billing/overview', { method: 'GET' });
+}
+
+export function adminUpdateUserBilling(userId, patch = {}) {
+  return request(`/api/admin/users/${encodeURIComponent(userId)}/billing`, {
+    method: 'POST',
+    body: JSON.stringify(patch),
+  });
+}
+
+export function adminExtendUserBilling(userId, days = 30) {
+  return request(`/api/admin/users/${encodeURIComponent(userId)}/billing/extend`, {
+    method: 'POST',
+    body: JSON.stringify({ days }),
+  });
+}
+
+// Audit log
+export function adminGetAudit({ limit = 200, q = '', action = '', actor = '' } = {}) {
+  const params = new URLSearchParams();
+  params.set('limit', String(limit));
+  if (q) params.set('q', q);
+  if (action) params.set('action', action);
+  if (actor) params.set('actor', actor);
+  return request(`/api/admin/audit?${params.toString()}`, { method: 'GET' });
+}
+
+// Activity feed
+export function adminGetActivity({ limit = 200 } = {}) {
+  const params = new URLSearchParams();
+  params.set('limit', String(limit));
+  return request(`/api/admin/activity?${params.toString()}`, { method: 'GET' });
+}
+
+// Sessions
+export function adminGetUserSessions(userId, { limit = 50 } = {}) {
+  const params = new URLSearchParams();
+  params.set('limit', String(limit));
+  return request(`/api/admin/users/${encodeURIComponent(userId)}/sessions?${params.toString()}`, { method: 'GET' });
+}
+
+export function adminRevokeUserSessions(userId, { sid = null } = {}) {
+  return request(`/api/admin/users/${encodeURIComponent(userId)}/sessions/revoke`, {
+    method: 'POST',
+    body: JSON.stringify(sid ? { sid } : {}),
+  });
+}
+
+export function adminGetUserDetail(userId) {
+  return request(`/api/admin/users/${encodeURIComponent(userId)}/detail`, { method: 'GET' });
+}
+
+export function adminDoctor() {
+  return request('/api/admin/doctor', { method: 'GET' });
+}
+
+export function adminListEmailTemplates() {
+  return request('/api/admin/email-templates', { method: 'GET' });
+}
+
+export function adminCreateEmailTemplate({ name, subject, mode = 'text', text = '', html = '' } = {}) {
+  return request('/api/admin/email-templates', {
+    method: 'POST',
+    body: JSON.stringify({ name, subject, mode, text, html }),
+  });
+}
+
+export function adminUpdateEmailTemplate(id, patch = {}) {
+  return request(`/api/admin/email-templates/${encodeURIComponent(id)}`, {
+    method: 'POST',
+    body: JSON.stringify(patch),
+  });
+}
+
+export function adminDeleteEmailTemplate(id) {
+  return request(`/api/admin/email-templates/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+}
+
+export function adminSendEmailTemplate(id, { userId, spaceSlug = null } = {}) {
+  return request(`/api/admin/email-templates/${encodeURIComponent(id)}/send`, {
+    method: 'POST',
+    body: JSON.stringify({ userId, ...(spaceSlug ? { spaceSlug } : {}) }),
   });
 }
