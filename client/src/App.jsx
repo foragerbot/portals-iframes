@@ -33,7 +33,8 @@ import {
   adminGetAudit,
   adminGetActivity,
   adminDoctor,
-  adminListEmailTemplates
+  adminListEmailTemplates,
+  adminGetUserSessions
 } from './api.js';
 
 import ReactMarkdown from 'react-markdown';

@@ -226,6 +226,66 @@ function normalizeEmail(email) {
   return String(email || '').trim().toLowerCase();
 }
 
+function getUserEmails(user) {
+  const u = user || {};
+  const out = [];
+
+  // legacy fields
+  if (u.email) out.push({ email: normalizeEmail(u.email), verifiedAt: u.emailVerifiedAt || null, source: 'legacy' });
+  if (u.pendingEmail) out.push({ email: normalizeEmail(u.pendingEmail), verifiedAt: null, source: 'pending' });
+
+  // new multi-email field (preferred)
+  if (Array.isArray(u.emails)) {
+    for (const e of u.emails) {
+      const em = normalizeEmail(e?.email);
+      if (!em) continue;
+      out.push({
+        email: em,
+        verifiedAt: e?.verifiedAt || e?.verifiedAt === null ? e.verifiedAt : null,
+        source: e?.source || 'emails',
+      });
+    }
+  }
+
+  // de-dupe
+  const seen = new Set();
+  const deduped = [];
+  for (const e of out) {
+    if (!e.email || seen.has(e.email)) continue;
+    seen.add(e.email);
+    deduped.push(e);
+  }
+  return deduped;
+}
+
+function userHasEmail(user, email) {
+  const needle = normalizeEmail(email);
+  if (!needle) return false;
+  return getUserEmails(user).some((e) => e.email === needle);
+}
+
+function upsertUserEmail(user, email, patch = {}) {
+  const u = user || {};
+  const em = normalizeEmail(email);
+  if (!em) return u;
+
+  const list = Array.isArray(u.emails) ? [...u.emails] : [];
+
+  const idx = list.findIndex((x) => normalizeEmail(x?.email) === em);
+
+  const next = {
+    email: em,
+    verifiedAt: patch.verifiedAt ?? null,
+    source: patch.source || null,
+  };
+
+  if (idx === -1) list.push(next);
+  else list[idx] = { ...list[idx], ...next };
+
+  return { ...u, emails: list };
+}
+
+
 function withUserDefaults(u) {
   const user = u || {};
   const billing = user.billing || {};
@@ -334,8 +394,17 @@ async function findUserByEmail(email) {
   if (!normalized) return null;
 
   const users = await loadUsersMeta();
-  const u = users.find((x) => normalizeEmail(x.email) === normalized);
-  return u || null;
+
+  // 1) match in emails[] (new)
+  for (const u of users) {
+    if (!u) continue;
+    if (Array.isArray(u.emails) && u.emails.some((e) => normalizeEmail(e?.email) === normalized)) {
+      return u;
+    }
+  }
+
+  // 2) fallback legacy match
+  return users.find((x) => normalizeEmail(x?.email) === normalized) || null;
 }
 
 // ───────────────── Generic helpers ─────────────────
@@ -1569,7 +1638,11 @@ app.get('/api/auth/discord/callback', async (req, res, next) => {
 
   const appBase = String(APP_BASE_URL || '').replace(/\/+$/, '');
   const bounce = (code) => {
-    if (!appBase) return res.status(500).json({ error: 'misconfigured', message: 'APP_BASE_URL is not set' });
+    if (!appBase) {
+      return res
+        .status(500)
+        .json({ error: 'misconfigured', message: 'APP_BASE_URL is not set' });
+    }
     return res.redirect(302, `${appBase}/login?error=${encodeURIComponent(code)}`);
   };
 
@@ -1590,9 +1663,7 @@ app.get('/api/auth/discord/callback', async (req, res, next) => {
     }
 
     if (!code) return bounce('missing_code');
-    if (!state || !expected || state !== expected) {
-      return bounce('bad_state');
-    }
+    if (!state || !expected || state !== expected) return bounce('bad_state');
 
     // Exchange code -> access token, then fetch /users/@me
     const token = await exchangeDiscordCodeForToken(code);
@@ -1607,7 +1678,7 @@ app.get('/api/auth/discord/callback', async (req, res, next) => {
     if (!hasRequiredRole(member)) return bounce('missing_required_role');
 
     // Optional email from Discord (may be null depending on scopes/user)
-    const discordEmail = String(me.email || '').trim().toLowerCase();
+    const discordEmail = normalizeEmail(me.email || '');
     const discordEmailOk = !!discordEmail && isValidEmail(discordEmail);
 
     // Build a stable avatar URL for UI
@@ -1615,7 +1686,9 @@ app.get('/api/auth/discord/callback', async (req, res, next) => {
     const isAnimated = avatarHash.startsWith('a_');
     const avatarExt = isAnimated ? 'gif' : 'png';
     const discordAvatarUrl = avatarHash
-      ? `https://cdn.discordapp.com/avatars/${encodeURIComponent(discordId)}/${encodeURIComponent(avatarHash)}.${avatarExt}?size=128`
+      ? `https://cdn.discordapp.com/avatars/${encodeURIComponent(
+          discordId
+        )}/${encodeURIComponent(avatarHash)}.${avatarExt}?size=128`
       : null;
 
     // Create or update user (Discord-first identity)
@@ -1630,14 +1703,20 @@ app.get('/api/auth/discord/callback', async (req, res, next) => {
         roles: ['user'],
         createdAt: nowIso,
 
+        // legacy email fields remain supported
         email: null,
         emailVerifiedAt: null,
         pendingEmail: null,
         pendingEmailSetAt: null,
+
+        // multi-email (new)
+        emails: [],
+        primaryEmail: null,
       };
       users.push(user);
     }
 
+    // Update Discord identity snapshot
     user.discordId = discordId;
     user.discordUsername = me.username || null;
     user.discordGlobalName = me.global_name || null;
@@ -1652,14 +1731,45 @@ app.get('/api/auth/discord/callback', async (req, res, next) => {
     user.status = user.status || 'active';
     user.updatedAt = nowIso;
 
-    const hasVerifiedEmail =
-      !!user.emailVerifiedAt &&
-      isValidEmail(String(user.email || '').trim().toLowerCase());
+    // ✅ Record Discord-linked email as an additional VERIFIED contact method.
+    // Important: this does NOT force primary email; primary can be set via onboarding.
+    if (discordEmailOk) {
+      user = upsertUserEmail(user, discordEmail, {
+        verifiedAt: nowIso,
+        source: 'discord',
+      });
 
-    if (!hasVerifiedEmail && discordEmailOk) {
-      user.pendingEmail = discordEmail;
-      user.pendingEmailSetAt = user.pendingEmailSetAt || nowIso;
+      // If user has no primary email set at all, default primary to Discord email.
+      // (If you want to force onboarding even in that case, delete this block.)
+      const hasPrimary = !!String(user.email || user.primaryEmail || '').trim();
+      if (!hasPrimary) {
+        user.email = discordEmail;
+        user.emailVerifiedAt = user.emailVerifiedAt || nowIso;
+        user.primaryEmail = discordEmail;
+      }
     }
+
+    // Determine if the user has a verified primary email already
+    const hasVerifiedEmail =
+      !!user.emailVerifiedAt && isValidEmail(normalizeEmail(user.email));
+
+    // ✅ Onboarding: if they don't have a verified primary, we can prefill pendingEmail
+    // with the Discord email (optional convenience).
+    if (!hasVerifiedEmail) {
+      if (discordEmailOk) {
+        user.pendingEmail = discordEmail;
+        user.pendingEmailSetAt = user.pendingEmailSetAt || nowIso;
+      } else {
+        user.pendingEmail = user.pendingEmail || null;
+        user.pendingEmailSetAt = user.pendingEmailSetAt || null;
+      }
+    }
+
+    // Persist updated user record (important: user may have been reassigned by upsertUserEmail)
+    // Because `user` is a reference to an object inside `users`, the array already sees updates.
+    // Still, we ensure the object in the array is the same reference by re-finding and replacing if needed.
+    const uIdx = users.findIndex((u) => u && u.id === user.id);
+    if (uIdx !== -1) users[uIdx] = user;
 
     await saveUsersMeta(users);
 
@@ -1670,6 +1780,7 @@ app.get('/api/auth/discord/callback', async (req, res, next) => {
     sessions.push({
       id: sid,
       userId: user.id,
+      // session email = primary email (legacy field)
       email: user.email || null,
       createdAt: nowIso,
       userAgent: req.get('user-agent') || null,
@@ -1685,7 +1796,9 @@ app.get('/api/auth/discord/callback', async (req, res, next) => {
     });
 
     if (!appBase) {
-      return res.status(500).json({ error: 'misconfigured', message: 'APP_BASE_URL is not set' });
+      return res
+        .status(500)
+        .json({ error: 'misconfigured', message: 'APP_BASE_URL is not set' });
     }
 
     if (hasVerifiedEmail) {
@@ -1698,8 +1811,6 @@ app.get('/api/auth/discord/callback', async (req, res, next) => {
     return bounce('discord_oauth_failed');
   }
 });
-
-
 
 /**
  * Restore a historical version into a live file path.
@@ -2403,16 +2514,62 @@ app.get('/api/auth/email/verify', async (req, res, next) => {
     }
 
     const nowIso = now.toISOString();
+    const normalizedEmail = normalizeEmail(t.email);
 
-    // Promote pending email to verified email
-    users[idx] = {
-      ...users[idx],
-      email: t.email,
+    if (!normalizedEmail || !isValidEmail(normalizedEmail)) {
+      return res.status(400).send('Bad email.');
+    }
+
+    // ✅ Collision check: no OTHER user may already have this email verified
+    for (const u of users) {
+      if (!u || u.id === t.userId) continue;
+
+      // Search in multi-email store first
+      if (Array.isArray(u.emails)) {
+        const hit = u.emails.find(
+          (e) =>
+            normalizeEmail(e?.email) === normalizedEmail &&
+            !!e?.verifiedAt
+        );
+        if (hit) {
+          return res
+            .status(409)
+            .send('This email is already verified on another account. Contact admin.');
+        }
+      }
+
+      // Fallback legacy check
+      const legacyEmail = normalizeEmail(u.email);
+      if (
+        legacyEmail === normalizedEmail &&
+        !!u.emailVerifiedAt
+      ) {
+        return res
+          .status(409)
+          .send('This email is already verified on another account. Contact admin.');
+      }
+    }
+
+    // ✅ Promote verified email to primary (admin comms) + store in emails[]
+    let user = users[idx];
+
+    user = {
+      ...user,
+      email: normalizedEmail,          // primary comms email (legacy field)
+      primaryEmail: normalizedEmail,   // preferred future field
       emailVerifiedAt: nowIso,
       pendingEmail: null,
       pendingEmailSetAt: null,
       updatedAt: nowIso,
     };
+
+    // Upsert into multi-email list as verified
+    user = upsertUserEmail(user, normalizedEmail, {
+      verifiedAt: nowIso,
+      source: 'manual',
+    });
+
+    users[idx] = user;
 
     // Mark token as used
     const tidx = tokens.findIndex((x) => x && x.id === tokenId);
@@ -2426,6 +2583,8 @@ app.get('/api/auth/email/verify', async (req, res, next) => {
     next(err);
   }
 });
+
+
 // POST /api/user/email/resend
 app.post('/api/user/email/resend', requireUser, requireEditorOrigin, async (req, res, next) => {
   res.setHeader('Cache-Control', 'no-store');
